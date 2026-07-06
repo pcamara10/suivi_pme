@@ -11,6 +11,7 @@ import { supabase } from "./supabaseClient";
 import AuthScreen from "./AuthScreen";
 import logoSuiviPME from "./assets/logo-suivi-pme.png";
 
+const PATCH_FACTURE_UNIQUE_SN_2026_07_06 = true;
 const INK = "#152238";
 const TEAL = "#1E7F6E";
 const MUSTARD = "#E0913C";
@@ -128,33 +129,6 @@ const normalizePaymentMode = (mode) => {
 const getPaymentMode = (mode) => PAYMENT_MODES.find((m) => m.value === normalizePaymentMode(mode)) || PAYMENT_MODES.find((m) => m.value === "Autre");
 const paymentOptions = (includeCredit = false) => PAYMENT_MODES.filter((m) => includeCredit || m.value !== "Crédit");
 
-const PREFIXES_TELEPHONE_SN = ["70", "71", "75", "76", "77", "78", "33"];
-
-const cleanPhoneDigits = (value) => {
-  let digits = String(value || "").replace(/\D/g, "");
-  if (digits.startsWith("221")) digits = digits.slice(3);
-  return digits.slice(0, 9);
-};
-
-const formatPhoneDisplaySN = (value) => {
-  const d = cleanPhoneDigits(value);
-  if (!d) return "";
-  if (d.length <= 2) return d;
-  if (d.length <= 5) return `${d.slice(0, 2)} ${d.slice(2)}`;
-  if (d.length <= 7) return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5)}`;
-  return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7, 9)}`;
-};
-
-const normalizeTelephoneSN = (value) => {
-  const digits = cleanPhoneDigits(value);
-  if (!digits) return { ok: true, value: null, digits: "" };
-  const prefix = digits.slice(0, 2);
-  const ok = digits.length === 9 && PREFIXES_TELEPHONE_SN.includes(prefix);
-  return { ok, digits, value: ok ? `+221 ${formatPhoneDisplaySN(digits)}` : null };
-};
-
-const messageTelephoneSN = "Numéro sénégalais invalide. Utilisez 9 chiffres avec un préfixe valide : 70, 71, 75, 76, 77, 78 ou 33. Exemple : 77 123 45 67.";
-
 const ABONNEMENT_MENSUEL = 25000;
 const JOURS_ESSAI_ABONNEMENT = 20;
 const JOURS_ALERTE_ABONNEMENT = 5;
@@ -182,10 +156,17 @@ const factureReference = (vente) => {
   return `FAC-${annee}-${court}`;
 };
 
+const normaliserReferenceFacture = (ref) => {
+  const value = String(ref || "").trim();
+  // On corrige uniquement les anciennes références créées par produit :
+  // FAC-2026-893127-1 -> FAC-2026-893127
+  // On NE touche PAS à une vraie référence comme FAC-2026-263833.
+  return value.replace(/^(FAC-\d{4}-\d{6})-\d+$/i, "$1");
+};
+
 const factureReferenceGroupe = (vente) => {
   const ref = factureReference(vente);
-  // Corrige les anciennes références créées par ligne : FAC-2026-123456-1 -> FAC-2026-123456
-  return String(ref || "").replace(/-\d+$/, "");
+  return normaliserReferenceFacture(ref);
 };
 
 const buildFactureGroups = (ventes, produits, clients) => {
@@ -368,25 +349,48 @@ function PaymentSelect({ value, onChange, style, includeCredit = false }) {
   </div>;
 }
 
+
+const cleanPhoneSN = (value) => String(value || "").replace(/[^0-9]/g, "").replace(/^221/, "").slice(0, 9);
+const isPhoneSNValid = (value) => /^(70|71|75|76|77|78|33)\d{7}$/.test(cleanPhoneSN(value));
+const formatPhoneSN = (value) => {
+  const d = cleanPhoneSN(value);
+  if (!d) return "";
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return `${d.slice(0, 2)} ${d.slice(2)}`;
+  if (d.length <= 7) return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5)}`;
+  return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7, 9)}`;
+};
+const normalizePhoneSN = (value) => {
+  const d = cleanPhoneSN(value);
+  return d ? `+221 ${formatPhoneSN(d)}` : null;
+};
+const assertPhoneSN = (value, label = "Numéro de téléphone") => {
+  const d = cleanPhoneSN(value);
+  if (!d) return { ok: true, value: null };
+  if (!isPhoneSNValid(d)) {
+    return { ok: false, message: `${label} invalide. Utilisez un numéro sénégalais valide : 77, 76, 75, 78, 70, 71 ou 33 + 7 chiffres.` };
+  }
+  return { ok: true, value: normalizePhoneSN(d) };
+};
+
 function PhoneSNInput({ value, onChange, style, placeholder = "77 123 45 67" }) {
-  const digits = cleanPhoneDigits(value);
-  const prefix = digits.slice(0, 2);
-  const isInvalid = digits.length > 0 && (digits.length !== 9 || !PREFIXES_TELEPHONE_SN.includes(prefix));
+  const digits = cleanPhoneSN(value);
+  const hasValue = digits.length > 0;
+  const valid = !hasValue || isPhoneSNValid(digits);
   return (
-    <div style={{ minWidth: 190 }}>
-      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${isInvalid ? CORAL : INK}22`, borderRadius: 7, overflow: "hidden", background: "#fff" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${valid ? INK + "22" : CORAL}`, borderRadius: 7, overflow: "hidden", background: "#fff", minWidth: 190 }}>
         <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
         <input
           type="tel"
-          inputMode="numeric"
           placeholder={placeholder}
-          value={formatPhoneDisplaySN(value)}
+          value={formatPhoneSN(digits)}
           maxLength={12}
-          onChange={(e) => onChange(cleanPhoneDigits(e.target.value))}
-          style={{ ...style, border: "none", minWidth: 125 }}
+          onChange={(e) => onChange(cleanPhoneSN(e.target.value))}
+          style={{ ...style, border: "none", minWidth: 135, outline: "none" }}
         />
       </div>
-      {isInvalid && <div style={{ color: CORAL, fontSize: 11, fontWeight: 800, marginTop: 4 }}>Préfixes autorisés : 70, 71, 75, 76, 77, 78, 33.</div>}
+      {!valid && <span style={{ color: CORAL, fontSize: 11.5, fontWeight: 800 }}>Préfixes autorisés : 77, 76, 75, 78, 70, 71, 33.</span>}
     </div>
   );
 }
@@ -1376,11 +1380,13 @@ export default function App() {
     if (isSuperAdmin && !getEntrepriseSystemeId()) return setMessage("Entreprise système ENT-SUPER introuvable. Exécutez le script SQL V6.9.6.");
 
     e.preventDefault();
+    const telCheck = assertPhoneSN(employeForm.telephone, "Téléphone employé");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!employeForm.nom_complet.trim()) return setMessage("Veuillez renseigner le nom complet.");
     const payload = {
       created_by: profil.id,
       nom_complet: employeForm.nom_complet.trim(),
-      telephone: employeForm.telephone ? `+221 ${String(employeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: employeForm.email || null,
       poste: employeForm.poste || null,
       salaire_base: Number(employeForm.salaire_base || 0),
@@ -1504,11 +1510,13 @@ export default function App() {
 
   async function saveProspect(e) {
     e.preventDefault();
+    const telCheck = assertPhoneSN(prospectForm.telephone, "Téléphone prospect");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!prospectForm.nom.trim()) return setMessage("Veuillez renseigner le nom du prospect.");
     const payload = {
       entreprise_id: entreprise.id,
       nom: prospectForm.nom.trim(),
-      telephone: prospectForm.telephone ? `+221 ${String(prospectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: prospectForm.email || null,
       source: prospectForm.source || null,
       statut: prospectForm.statut,
@@ -1871,8 +1879,8 @@ export default function App() {
 
   async function savePerson(table, form, setter, empty) {
     if (!entreprise?.id || !form.nom.trim()) return;
-    const tel = normalizeTelephoneSN(form.telephone);
-    if (!tel.ok) return setMessage(messageTelephoneSN);
+    const tel = assertPhoneSN(form.telephone, "Téléphone");
+    if (!tel.ok) return setMessage(tel.message);
     const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: tel.value, email: form.email || null, adresse: form.adresse || null };
     if (!form.id && table === "clients") payload.code_client = `CLI-${String(Date.now()).slice(-6)}`;
     if (!form.id && table === "fournisseurs") payload.code_fournisseur = `FOU-${String(Date.now()).slice(-6)}`;
@@ -2001,7 +2009,7 @@ export default function App() {
         quantite: l.quantite,
         prix_unitaire: l.prix_unitaire,
         utilisateur_id: profil.id,
-        reference: String(baseRef).replace(/-\d+$/, ""),
+        reference: baseRef,
         statut: resteLigne <= 0 ? "payée" : "validée",
         mode_paiement: venteForm.mode_paiement || "Espèces",
         type_vente: typeVente,
@@ -2406,7 +2414,9 @@ export default function App() {
 
   async function saveEntreprise(e) {
     e.preventDefault();
-    const payloadEntreprise = { ...entrepriseForm, telephone: entrepriseForm.telephone ? `+221 ${String(entrepriseForm.telephone).replace(/^\+221\s?/, "")}` : null };
+    const telCheck = assertPhoneSN(entrepriseForm.telephone, "Téléphone entreprise");
+    if (!telCheck.ok) return setMessage(telCheck.message);
+    const payloadEntreprise = { ...entrepriseForm, telephone: assertPhoneSN(entrepriseForm.telephone, "Téléphone entreprise").value };
     const { error } = await supabase.from("entreprises").update(payloadEntreprise).eq("id", entreprise.id);
     if (error) showError(error, "Impossible de modifier les paramètres."); else { setMessage("Paramètres enregistrés."); chargerProfilEtEntreprise(); }
   }
@@ -2435,27 +2445,27 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { font-family: Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
-            .page { width: 800px; margin: 24px auto; background: white; padding: 38px; border-radius: 12px; }
-            .header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 4px solid #1E7F6E; padding-bottom: 18px; }
+            body { font-family: Inter, Arial, sans-serif; margin: 0; background: #eef3f6; color: #152238; }
+            .page { width: 860px; margin: 24px auto; background: white; padding: 0; border-radius: 18px; overflow:hidden; box-shadow:0 24px 70px rgba(21,34,56,.16); }
+            .header { display: flex; justify-content: space-between; gap: 20px; padding: 34px 38px 24px; background:linear-gradient(135deg,#152238 0%,#1E7F6E 72%,#E0913C 100%); color:white; }
             .brand h1 { margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: .5px; }
-            .brand div { margin-top: 6px; font-size: 13px; color: #5b6472; line-height: 1.45; }
+            .brand div { margin-top: 6px; font-size: 13px; color: rgba(255,255,255,.86); line-height: 1.45; }
             .badge { text-align: right; }
-            .badge h2 { margin: 0; color: #1E7F6E; font-size: 26px; }
-            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; }
-            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
+            .badge h2 { margin: 0; color: #fff; font-size: 30px; letter-spacing:.8px; }
+            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; color:rgba(255,255,255,.9); }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 26px 38px; }
             .box { border: 1px solid #e2e6ea; border-radius: 10px; padding: 14px; min-height: 110px; }
             .box-title { font-size: 12px; text-transform: uppercase; color: #1E7F6E; font-weight: bold; margin-bottom: 10px; letter-spacing: .4px; }
             .line { font-size: 14px; margin: 5px 0; line-height: 1.35; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            table { width: calc(100% - 76px); margin: 10px 38px 0; border-collapse: collapse; border-radius:12px; overflow:hidden; }
             th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 12px; text-transform: uppercase; }
             td { padding: 13px 12px; border-bottom: 1px solid #e8eaee; font-size: 14px; }
             .right { text-align: right; }
-            .total-box { margin-left: auto; margin-top: 22px; width: 360px; border: 2px solid #1E7F6E; border-radius: 10px; padding: 14px 16px; }
+            .total-box { margin-left: auto; margin-top: 24px; margin-right:38px; width: 380px; background:#f8fafc; border: 2px solid #1E7F6E; border-radius: 14px; padding: 16px 18px; }
             .total-line { display:flex; justify-content:space-between; margin: 8px 0; font-size: 14px; }
             .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 22px; font-weight: bold; color: #1E7F6E; border-top: 1px solid #dce5e2; padding-top: 10px; margin-top: 10px; }
-            .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; }
-            .signature { margin-top: 36px; display: flex; justify-content: flex-end; }
+            .footer { margin-top: 34px; padding: 18px 38px 28px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; background:#f8fafc; }
+            .signature { margin-top: 40px; margin-right:38px; display: flex; justify-content: flex-end; }
             .signature div { width: 220px; border-top: 1px solid #152238; padding-top: 8px; text-align: center; font-size: 13px; }
             @media print { body { background: white; } .page { width: auto; margin: 0; border-radius: 0; box-shadow: none; } }
           </style>
@@ -2631,11 +2641,13 @@ export default function App() {
 
   async function sauvegarderPMEAdmin(e) {
     e.preventDefault();
+    const telCheck = assertPhoneSN(editPmeForm.telephone, "Téléphone PME");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!selectedPmeAdmin?.id) return setMessage("Aucune PME sélectionnée.");
 
     const { error } = await supabase.from("entreprises").update({
       nom: editPmeForm.nom,
-      telephone: editPmeForm.telephone || null,
+      telephone: assertPhoneSN(editPmeForm.telephone, "Téléphone PME").value,
       email: editPmeForm.email || null,
       adresse: editPmeForm.adresse || null,
       ninea: editPmeForm.ninea || null,
@@ -2809,7 +2821,7 @@ const { data: existing } = await supabase
         created_by: null,
         nom_complet: premierGerantForm.nom_complet.trim(),
         email: premierGerantForm.email.trim(),
-        telephone: premierGerantForm.telephone || null,
+        telephone: assertPhoneSN(premierGerantForm.telephone, "Téléphone gérant").value,
         role: "gerant",
         poste: "gerant",
         actif: true
@@ -2851,6 +2863,8 @@ const { data: existing } = await supabase
 
   async function creerProfilEnAttente(e) {
     e?.preventDefault?.();
+    const telCheck = assertPhoneSN(newUserForm.telephone, "Téléphone utilisateur");
+    if (!telCheck.ok) return setMessage(telCheck.message);
 
     if (!newUserForm.nom_complet?.trim()) return setMessage("Veuillez renseigner le nom complet.");
     if (!newUserForm.email?.trim()) return setMessage("Veuillez renseigner l'email.");
@@ -2864,7 +2878,7 @@ const { data: existing } = await supabase
       created_by: null,
       nom_complet: newUserForm.nom_complet.trim(),
       email: newUserForm.email.trim(),
-      telephone: newUserForm.telephone || null,
+      telephone: assertPhoneSN(newUserForm.telephone, "Téléphone utilisateur").value,
       role: newUserForm.poste === "gerant" ? "gerant" : "employe",
       poste: enAttente ? "a_rattacher" : (newUserForm.poste || "employe"),
       poste_souhaite: newUserForm.poste || "employe",
@@ -2885,11 +2899,15 @@ const { data: existing } = await supabase
 
   async function superCreerPME(e) {
     e.preventDefault();
+    const telCheck = assertPhoneSN(superPmeForm.telephone, "Téléphone PME");
+    if (!telCheck.ok) return setMessage(telCheck.message);
+    const telGerantCheck = assertPhoneSN(premierGerantForm.telephone, "Téléphone gérant");
+    if (!telGerantCheck.ok) return setMessage(telGerantCheck.message);
     if (!superPmeForm.nom.trim()) return setMessage("Veuillez renseigner le nom de la PME.");
 
     const { data: ent, error } = await supabase.from("entreprises").insert({
       nom: superPmeForm.nom.trim(),
-      telephone: superPmeForm.telephone ? `+221 ${String(superPmeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: superPmeForm.email || null,
       adresse: superPmeForm.adresse || null,
       ninea: superPmeForm.ninea || null,
@@ -3093,11 +3111,13 @@ const { data: existing } = await supabase
 
   async function superSaveProspect(e) {
     e.preventDefault();
+    const telCheck = assertPhoneSN(superCrmProspectForm.telephone, "Téléphone prospect CRM");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!superCrmProspectForm.nom.trim()) return setMessage("Nom prospect obligatoire.");
     const { error } = await supabase.from("prospects").insert({
       entreprise_id: entreprise?.id || allEntreprises[0]?.id || null,
       nom: superCrmProspectForm.nom.trim(),
-      telephone: superCrmProspectForm.telephone ? `+221 ${String(superCrmProspectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: superCrmProspectForm.email || null,
       source: superCrmProspectForm.source || "Plateforme SaaS",
       statut: superCrmProspectForm.statut,
@@ -3498,7 +3518,7 @@ const { error } = await supabase.from("messagerie_saas").insert({
         <Field label="Mot de passe temporaire"><input type="text" style={{...inputStyle,minWidth:190}} placeholder="Auto si vide" value={premierGerantForm.mot_de_passe} onChange={e=>setPremierGerantForm({...premierGerantForm,mot_de_passe:e.target.value})}/></Field>
       </div>}
       <div style={{fontSize:12.5,color:`${INK}AA`,marginTop:8}}>Le gérant sera rattaché automatiquement à cette PME avec le rôle <b>Gérant</b>.</div>
-    </div><Button type="submit"><Plus size={15}/> Créer PME cliente</Button></form><Table headers={["PME","Code","Statut","Invitation","Téléphone","Email","NINEA","RCCM","Users","Plan","Actions"]}>{allEntreprises.map(e=>{const users=allProfils.filter(p=>p.entreprise_id===e.id); const ab=abonnements.find(a=>a.entreprise_id===e.id); const pl=plans.find(p=>p.id===ab?.plan_id); return <tr key={e.id} style={{borderTop:`1px solid ${INK}0D`,background:selectedPmeAdmin?.id===e.id?`${TEAL}10`:"transparent"}}><td style={{...cell,fontWeight:800}}>{e.nom}</td><td style={cell}>{e.code_entreprise||codeCourt("ENT",e.id)}</td><td style={cell}><span style={{fontWeight:800,color:(e.statut_saas||"actif")==="actif"?TEAL:CORAL}}>{e.statut_saas||"actif"}</span></td><td style={cell}><span style={{fontWeight:800}}>{e.code_invitation}</span> <button onClick={()=>{navigator.clipboard?.writeText(e.code_invitation); setMessage("Code invitation copié.");}} style={linkBtn(TEAL)}>Copier</button></td><td style={cell}>{e.telephone||"—"}</td><td style={cell}>{e.email||"—"}</td><td style={cell}>{e.ninea||"—"}</td><td style={cell}>{e.rccm||"—"}</td><td style={cell}>{users.length}</td><td style={cell}>{isEntrepriseSysteme(e)?<span style={{fontWeight:900,color:TEAL}}>Plateforme système — abonnement exclu</span>:(pl?.nom||"—")}</td><td style={cell}><button onClick={()=>ouvrirAdministrationPME(e)} style={linkBtn(TEAL)}>Administrer</button>{!isEntrepriseSysteme(e) && ((e.statut_saas||"actif")==="actif"?<button onClick={()=>changerStatutPME(e.id,"suspendu")} style={linkBtn(CORAL)}>Suspendre</button>:<button onClick={()=>changerStatutPME(e.id,"actif")} style={linkBtn(TEAL)}>Activer</button>)}</td></tr>})}</Table>{selectedPmeAdmin && <div style={{marginTop:22,background:CARD,border:`1px solid ${INK}12`,borderRadius:14,padding:18}}><SectionTitle title={`Administration : ${selectedPmeAdmin.nom}`} sub="Modifiez la PME sélectionnée et gérez ses utilisateurs/rôles." /><form onSubmit={sauvegarderPMEAdmin} style={formStyle("#fff", INK)}><Field label="Nom PME"><input required style={{...inputStyle,minWidth:220}} value={editPmeForm.nom} onChange={e=>setEditPmeForm({...editPmeForm,nom:e.target.value})}/></Field><Field label="Téléphone"><input style={{...inputStyle,minWidth:160}} value={editPmeForm.telephone} onChange={e=>setEditPmeForm({...editPmeForm,telephone:e.target.value})}/></Field><Field label="Email"><input type="email" style={{...inputStyle,minWidth:190}} value={editPmeForm.email} onChange={e=>setEditPmeForm({...editPmeForm,email:e.target.value})}/></Field><Field label="Adresse"><input style={{...inputStyle,minWidth:220}} value={editPmeForm.adresse} onChange={e=>setEditPmeForm({...editPmeForm,adresse:e.target.value})}/></Field><Field label="NINEA"><input style={{...inputStyle,minWidth:130}} value={editPmeForm.ninea} onChange={e=>setEditPmeForm({...editPmeForm,ninea:e.target.value})}/></Field><Field label="RCCM"><input style={{...inputStyle,minWidth:130}} value={editPmeForm.rccm} onChange={e=>setEditPmeForm({...editPmeForm,rccm:e.target.value})}/></Field><Field label="Statut SaaS"><select style={inputStyle} value={editPmeForm.statut_saas} onChange={e=>setEditPmeForm({...editPmeForm,statut_saas:e.target.value})}><option value="actif">Actif</option><option value="essai">Essai</option><option value="lecture_seule">Lecture seule</option><option value="suspendu">Suspendu</option><option value="expire">Expiré</option></select></Field><Button type="submit">Enregistrer modifications PME</Button><Button type="button" secondary onClick={()=>setSelectedPmeAdmin(null)}>Fermer</Button></form><SectionTitle title="Utilisateurs de cette PME" /><Table headers={["Nom","Email","Téléphone","Rôle","Statut","Créé par","Actions"]}>{allProfils.filter(u=>u.entreprise_id===selectedPmeAdmin.id && u.poste!=="super_admin").map(u=>{const createur=allProfils.find(p=>p.id===u.created_by); const actif=u.actif!==false; return <tr key={u.id} style={{borderTop:`1px solid ${INK}0D`,background:!actif?`${CORAL}08`:"transparent"}}><td style={{...cell,fontWeight:800}}>{u.nom_complet||"—"}</td><td style={cell}>{u.email||"—"}</td><td style={cell}>{u.telephone||"—"}</td><td style={cell}><select style={inputStyle} value={u.poste||u.role||"employe"} onChange={e=>changerRoleUserPME(u.id,e.target.value)}><option value="gerant">Gérant</option><option value="employe">Employé</option><option value="caissier">Caissier</option><option value="magasinier">Magasinier</option><option value="comptable">Comptable</option></select></td><td style={cell}><span style={{fontWeight:800,color:actif?TEAL:CORAL}}>{actif?"Actif":"Désactivé"}</span></td><td style={cell}>{createur?.nom_complet||"—"}</td><td style={cell}>{actif?<button onClick={()=>changerStatutUserPME(u.id,false)} style={linkBtn(CORAL)}>Désactiver</button>:<button onClick={()=>changerStatutUserPME(u.id,true)} style={linkBtn(TEAL)}>Activer</button>}<button onClick={()=>supprimerUtilisateurAdmin(u.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>})}</Table></div>}</>}
+    </div><Button type="submit"><Plus size={15}/> Créer PME cliente</Button></form><Table headers={["PME","Code","Statut","Invitation","Téléphone","Email","NINEA","RCCM","Users","Plan","Actions"]}>{allEntreprises.map(e=>{const users=allProfils.filter(p=>p.entreprise_id===e.id); const ab=abonnements.find(a=>a.entreprise_id===e.id); const pl=plans.find(p=>p.id===ab?.plan_id); return <tr key={e.id} style={{borderTop:`1px solid ${INK}0D`,background:selectedPmeAdmin?.id===e.id?`${TEAL}10`:"transparent"}}><td style={{...cell,fontWeight:800}}>{e.nom}</td><td style={cell}>{e.code_entreprise||codeCourt("ENT",e.id)}</td><td style={cell}><span style={{fontWeight:800,color:(e.statut_saas||"actif")==="actif"?TEAL:CORAL}}>{e.statut_saas||"actif"}</span></td><td style={cell}><span style={{fontWeight:800}}>{e.code_invitation}</span> <button onClick={()=>{navigator.clipboard?.writeText(e.code_invitation); setMessage("Code invitation copié.");}} style={linkBtn(TEAL)}>Copier</button></td><td style={cell}>{e.telephone||"—"}</td><td style={cell}>{e.email||"—"}</td><td style={cell}>{e.ninea||"—"}</td><td style={cell}>{e.rccm||"—"}</td><td style={cell}>{users.length}</td><td style={cell}>{isEntrepriseSysteme(e)?<span style={{fontWeight:900,color:TEAL}}>Plateforme système — abonnement exclu</span>:(pl?.nom||"—")}</td><td style={cell}><button onClick={()=>ouvrirAdministrationPME(e)} style={linkBtn(TEAL)}>Administrer</button>{!isEntrepriseSysteme(e) && ((e.statut_saas||"actif")==="actif"?<button onClick={()=>changerStatutPME(e.id,"suspendu")} style={linkBtn(CORAL)}>Suspendre</button>:<button onClick={()=>changerStatutPME(e.id,"actif")} style={linkBtn(TEAL)}>Activer</button>)}</td></tr>})}</Table>{selectedPmeAdmin && <div style={{marginTop:22,background:CARD,border:`1px solid ${INK}12`,borderRadius:14,padding:18}}><SectionTitle title={`Administration : ${selectedPmeAdmin.nom}`} sub="Modifiez la PME sélectionnée et gérez ses utilisateurs/rôles." /><form onSubmit={sauvegarderPMEAdmin} style={formStyle("#fff", INK)}><Field label="Nom PME"><input required style={{...inputStyle,minWidth:220}} value={editPmeForm.nom} onChange={e=>setEditPmeForm({...editPmeForm,nom:e.target.value})}/></Field><Field label="Téléphone"><PhoneSNInput value={editPmeForm.telephone} onChange={v=>setEditPmeForm({...editPmeForm,telephone:v})} style={inputStyle}/></Field><Field label="Email"><input type="email" style={{...inputStyle,minWidth:190}} value={editPmeForm.email} onChange={e=>setEditPmeForm({...editPmeForm,email:e.target.value})}/></Field><Field label="Adresse"><input style={{...inputStyle,minWidth:220}} value={editPmeForm.adresse} onChange={e=>setEditPmeForm({...editPmeForm,adresse:e.target.value})}/></Field><Field label="NINEA"><input style={{...inputStyle,minWidth:130}} value={editPmeForm.ninea} onChange={e=>setEditPmeForm({...editPmeForm,ninea:e.target.value})}/></Field><Field label="RCCM"><input style={{...inputStyle,minWidth:130}} value={editPmeForm.rccm} onChange={e=>setEditPmeForm({...editPmeForm,rccm:e.target.value})}/></Field><Field label="Statut SaaS"><select style={inputStyle} value={editPmeForm.statut_saas} onChange={e=>setEditPmeForm({...editPmeForm,statut_saas:e.target.value})}><option value="actif">Actif</option><option value="essai">Essai</option><option value="lecture_seule">Lecture seule</option><option value="suspendu">Suspendu</option><option value="expire">Expiré</option></select></Field><Button type="submit">Enregistrer modifications PME</Button><Button type="button" secondary onClick={()=>setSelectedPmeAdmin(null)}>Fermer</Button></form><SectionTitle title="Utilisateurs de cette PME" /><Table headers={["Nom","Email","Téléphone","Rôle","Statut","Créé par","Actions"]}>{allProfils.filter(u=>u.entreprise_id===selectedPmeAdmin.id && u.poste!=="super_admin").map(u=>{const createur=allProfils.find(p=>p.id===u.created_by); const actif=u.actif!==false; return <tr key={u.id} style={{borderTop:`1px solid ${INK}0D`,background:!actif?`${CORAL}08`:"transparent"}}><td style={{...cell,fontWeight:800}}>{u.nom_complet||"—"}</td><td style={cell}>{u.email||"—"}</td><td style={cell}>{u.telephone||"—"}</td><td style={cell}><select style={inputStyle} value={u.poste||u.role||"employe"} onChange={e=>changerRoleUserPME(u.id,e.target.value)}><option value="gerant">Gérant</option><option value="employe">Employé</option><option value="caissier">Caissier</option><option value="magasinier">Magasinier</option><option value="comptable">Comptable</option></select></td><td style={cell}><span style={{fontWeight:800,color:actif?TEAL:CORAL}}>{actif?"Actif":"Désactivé"}</span></td><td style={cell}>{createur?.nom_complet||"—"}</td><td style={cell}>{actif?<button onClick={()=>changerStatutUserPME(u.id,false)} style={linkBtn(CORAL)}>Désactiver</button>:<button onClick={()=>changerStatutUserPME(u.id,true)} style={linkBtn(TEAL)}>Activer</button>}<button onClick={()=>supprimerUtilisateurAdmin(u.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>})}</Table></div>}</>}
 
         {superTab === "super_users" && <><div style={{background:`${MUSTARD}12`,border:`1px solid ${MUSTARD}44`,borderRadius:10,padding:12,marginBottom:14,fontSize:13}}><b>Rattachement utilisateur :</b> si aucune PME n’est choisie, l’utilisateur est placé en attente et une alerte apparaît dans l’espace Super Admin pour le rattacher.</div>
         
