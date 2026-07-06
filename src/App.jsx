@@ -147,6 +147,21 @@ const formatDateFr = (dateStr) => {
   return d.toLocaleDateString("fr-FR");
 };
 
+const SENEGAL_PHONE_PREFIXES = ["70", "71", "75", "76", "77", "78", "30", "32", "33", "36", "38", "39"];
+
+const normalizePhoneSN = (value) => {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("00221")) digits = digits.slice(5);
+  if (digits.startsWith("221")) digits = digits.slice(3);
+  digits = digits.slice(0, 9);
+  const formatted = digits.replace(/(\d{2})(\d{3})(\d{2})(\d{2})/, "$1 $2 $3 $4").trim();
+  const prefix = digits.slice(0, 2);
+  const isValid = digits.length === 9 && SENEGAL_PHONE_PREFIXES.includes(prefix);
+  return { digits, formatted, prefix, isValid, full: isValid ? `+221 ${formatted}` : "" };
+};
+
+const isValidPhoneSN = (value) => !String(value || "").trim() || normalizePhoneSN(value).isValid;
+
 const factureReference = (vente) => {
   if (!vente) return "";
   if (vente.reference) return vente.reference;
@@ -157,12 +172,8 @@ const factureReference = (vente) => {
 
 const factureReferenceGroupe = (vente) => {
   const ref = factureReference(vente);
-  const value = String(ref || "");
-  // Corrige uniquement les anciennes références créées par ligne :
-  // FAC-2026-123456-1 -> FAC-2026-123456
-  // Important : ne pas transformer FAC-2026-123456 en FAC-2026.
-  const match = value.match(/^(FAC-\d{4}-\d{4,})-\d+$/);
-  return match ? match[1] : value;
+  // Corrige les anciennes références créées par ligne : FAC-2026-123456-1 -> FAC-2026-123456
+  return String(ref || "").replace(/-\d+$/, "");
 };
 
 const buildFactureGroups = (ventes, produits, clients) => {
@@ -346,16 +357,23 @@ function PaymentSelect({ value, onChange, style, includeCredit = false }) {
 }
 
 function PhoneSNInput({ value, onChange, style, placeholder = "77 000 00 00" }) {
+  const parsed = normalizePhoneSN(value);
+  const hasValue = String(value || "").trim().length > 0;
   return (
-    <div style={{ display: "flex", alignItems: "center", border: `1px solid ${INK}22`, borderRadius: 7, overflow: "hidden", background: "#fff", minWidth: 170 }}>
-      <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
-      <input
-        type="tel"
-        placeholder={placeholder}
-        value={String(value || "").replace(/^\+221\s?/, "")}
-        onChange={(e) => onChange(e.target.value.replace(/[^0-9 ]/g, ""))}
-        style={{ ...style, border: "none", minWidth: 120 }}
-      />
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${hasValue && !parsed.isValid ? CORAL : INK}22`, borderRadius: 7, overflow: "hidden", background: "#fff", minWidth: 190 }}>
+        <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 800, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
+        <input
+          type="tel"
+          inputMode="numeric"
+          maxLength={12}
+          placeholder={placeholder}
+          value={parsed.formatted}
+          onChange={(e) => onChange(normalizePhoneSN(e.target.value).formatted)}
+          style={{ ...style, border: "none", minWidth: 130 }}
+        />
+      </div>
+      {hasValue && !parsed.isValid && <small style={{ color: CORAL, fontWeight: 800, fontSize: 11 }}>Numéro invalide. Formats acceptés : 70, 71, 75, 76, 77, 78, 33, 30, 32, 36… sur 9 chiffres.</small>}
     </div>
   );
 }
@@ -1840,7 +1858,9 @@ export default function App() {
 
   async function savePerson(table, form, setter, empty) {
     if (!entreprise?.id || !form.nom.trim()) return;
-    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: form.telephone ? `+221 ${form.telephone}` : null, email: form.email || null, adresse: form.adresse || null };
+    if (!isValidPhoneSN(form.telephone)) return setMessage("Numéro de téléphone invalide. Utilisez un numéro Sénégal valide : 77, 76, 78, 70, 71, 75, 33, 30, 32, 36…");
+    const phone = normalizePhoneSN(form.telephone);
+    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: phone.full || null, email: form.email || null, adresse: form.adresse || null };
     if (!form.id && table === "clients") payload.code_client = `CLI-${String(Date.now()).slice(-6)}`;
     if (!form.id && table === "fournisseurs") payload.code_fournisseur = `FOU-${String(Date.now()).slice(-6)}`;
     const res = form.id ? await supabase.from(table).update(payload).eq("id", form.id) : await supabase.from(table).insert(payload);
@@ -1968,11 +1988,7 @@ export default function App() {
         quantite: l.quantite,
         prix_unitaire: l.prix_unitaire,
         utilisateur_id: profil.id,
-        // Une vente multi-produits reste une seule facture.
-        // Si la base possède encore une contrainte unique sur reference,
-        // chaque ligne garde un suffixe technique (-1, -2, -3), mais l'application
-        // regroupe toujours ces lignes sous la facture affichée baseRef.
-        reference: `${baseRef}-${index + 1}`,
+        reference: baseRef,
         statut: resteLigne <= 0 ? "payée" : "validée",
         mode_paiement: venteForm.mode_paiement || "Espèces",
         type_vente: typeVente,
@@ -2377,49 +2393,34 @@ export default function App() {
 
   async function saveEntreprise(e) {
     e.preventDefault();
-    const payloadEntreprise = { ...entrepriseForm, telephone: entrepriseForm.telephone ? `+221 ${String(entrepriseForm.telephone).replace(/^\+221\s?/, "")}` : null };
+    if (!isValidPhoneSN(entrepriseForm.telephone)) return setMessage("Numéro de téléphone entreprise invalide. Utilisez un numéro Sénégal valide : 77, 76, 78, 70, 71, 75, 33, 30, 32, 36…");
+    const phone = normalizePhoneSN(entrepriseForm.telephone);
+    const payloadEntreprise = { ...entrepriseForm, telephone: phone.full || null };
     const { error } = await supabase.from("entreprises").update(payloadEntreprise).eq("id", entreprise.id);
     if (error) showError(error, "Impossible de modifier les paramètres."); else { setMessage("Paramètres enregistrés."); chargerProfilEtEntreprise(); }
   }
   function imprimerFacture(v) {
     const isGroupe = Array.isArray(v?.lignes);
-    const ref = v.reference || factureReferenceGroupe(v);
     const lignes = isGroupe
       ? v.lignes
       : ventes
           .filter((x) => factureReferenceGroupe(x) === factureReferenceGroupe(v) && x.client_id === v.client_id)
-          .map((x) => ({
-            ...x,
-            produit: produits.find((p) => p.id === x.produit_id),
-            total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0)
-          }));
-
-    const lignesFinales = lignes.length
-      ? lignes
-      : [{ ...v, produit: produits.find((x) => x.id === v.produit_id), total: Number(v.quantite || 0) * Number(v.prix_unitaire || 0) }];
-
+          .map((x) => ({ ...x, produit: produits.find((p) => p.id === x.produit_id), total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0) }));
+    const lignesFinales = lignes.length ? lignes : [{ ...v, produit: produits.find((x) => x.id === v.produit_id), total: Number(v.quantite || 0) * Number(v.prix_unitaire || 0) }];
     const c = v.client || clients.find((x) => x.id === v.client_id);
     const total = lignesFinales.reduce((s, l) => s + Number(l.total || (Number(l.quantite || 0) * Number(l.prix_unitaire || 0))), 0);
     const montantPaye = isGroupe ? Number(v.montant_paye || 0) : lignesFinales.reduce((s, l) => s + Number(l.montant_paye || 0), 0);
-    const reste = Math.max(total - montantPaye, 0);
-    const statut = reste <= 0 ? "payée" : (v.statut || "validée");
-    const dateFacture = v.date_vente || String(v.created_at || today()).slice(0, 10);
-    const mode = v.mode_paiement || "Espèces";
-
-    const rows = lignesFinales.map((l, i) => {
-      const nomProduit = l.produit?.nom || produits.find(p => p.id === l.produit_id)?.nom || "Produit";
-      const qte = Number(l.quantite || 0);
-      const pu = Number(l.prix_unitaire || 0);
-      const ligneTotal = Number(l.total || qte * pu);
-      return `
-        <tr>
-          <td class="center">${i + 1}</td>
-          <td>${safeText(nomProduit)}</td>
-          <td class="center">${safeText(qte)}</td>
-          <td class="right">${safeText(fmt(pu))}</td>
-          <td class="right"><strong>${safeText(fmt(ligneTotal))}</strong></td>
-        </tr>`;
-    }).join("");
+    const reste = isGroupe ? Number(v.reste_a_payer || 0) : Math.max(total - montantPaye, 0);
+    const ref = factureReferenceGroupe(v);
+    const dateFacture = v.date_vente || lignesFinales[0]?.date_vente || today();
+    const rows = lignesFinales.map((l, i) => `
+      <tr>
+        <td class="center">${i + 1}</td>
+        <td>${safeText(l.produit?.nom || produits.find(p => p.id === l.produit_id)?.nom || "Produit")}</td>
+        <td class="center">${safeText(l.quantite)}</td>
+        <td class="right">${safeText(fmt(l.prix_unitaire))}</td>
+        <td class="right"><strong>${safeText(fmt(Number(l.quantite || 0) * Number(l.prix_unitaire || 0)))}</strong></td>
+      </tr>`).join("");
 
     const html = `
       <html>
@@ -2427,103 +2428,65 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { font-family: Arial, Helvetica, sans-serif; margin: 0; background: #f3f4f6; color: #111827; }
-            .page { width: 860px; margin: 18px auto; background: #fff; min-height: 1120px; box-shadow: 0 18px 45px rgba(15, 23, 42, .18); }
-            .top { display: grid; grid-template-columns: 1.3fr .9fr; background: #123955; color: #fff; padding: 28px 36px; align-items: center; }
-            .brand { display: flex; align-items: center; gap: 18px; }
-            .mark { width: 86px; height: 70px; position: relative; }
-            .tri1, .tri2, .tri3 { position: absolute; width: 0; height: 0; border-style: solid; }
-            .tri1 { left: 0; top: 0; border-width: 0 34px 58px 34px; border-color: transparent transparent #f0b45d transparent; }
-            .tri2 { left: 34px; top: 0; border-width: 58px 34px 0 34px; border-color: #e9eef3 transparent transparent transparent; }
-            .tri3 { left: 17px; top: 32px; border-width: 0 34px 58px 34px; border-color: transparent transparent #fff transparent; opacity: .9; transform: rotate(180deg); }
-            .brand h1 { margin: 0; font-size: 25px; letter-spacing: .5px; text-transform: uppercase; }
-            .brand p { margin: 7px 0 0; font-size: 12px; opacity: .9; line-height: 1.5; }
-            .invoice-meta { text-align: right; font-size: 13px; line-height: 1.7; font-weight: 700; }
-            .title-band { background: #fde0b7; padding: 30px 36px 24px; }
-            .title-band h2 { margin: 0; font-size: 34px; letter-spacing: .7px; text-transform: uppercase; color: #0f172a; }
-            .info-area { background: #fde0b7; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 0 36px 30px; }
-            .info-card { background: rgba(255,255,255,.25); border: 1px solid rgba(15,23,42,.12); }
-            .info-head { background: #f0b45d; color: #111827; padding: 11px 16px; font-weight: 900; text-transform: uppercase; font-size: 15px; }
-            .info-body { padding: 16px; font-size: 13px; line-height: 1.55; }
-            .content { padding: 30px 36px 24px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 0; }
-            th { background: #123955; color: #fff; text-align: left; padding: 13px 12px; font-size: 12px; text-transform: uppercase; border: 2px solid #0f2e45; letter-spacing: .3px; }
-            td { padding: 13px 12px; border: 2px solid #111827; font-size: 13px; background: #fff; }
-            .right { text-align: right; }
-            .center { text-align: center; }
-            .summary { width: 360px; margin-left: auto; margin-top: 0; border-left: 2px solid #111827; border-right: 2px solid #111827; }
-            .summary-row { display: grid; grid-template-columns: 1fr 145px; border-bottom: 2px solid #111827; }
-            .summary-row div { padding: 13px 12px; background: #d9ecf7; font-size: 13px; }
-            .summary-row div:first-child { font-weight: 800; }
-            .summary-row.total div { background: #123955; color: #fff; font-size: 18px; font-weight: 900; }
-            .terms { margin-top: 28px; font-size: 13px; line-height: 1.55; }
-            .signature { margin-top: 46px; display: flex; justify-content: space-between; gap: 30px; font-size: 13px; }
-            .signature-box { width: 240px; border-top: 2px solid #111827; padding-top: 8px; text-align: center; }
-            .footer { margin-top: 30px; font-weight: 800; font-size: 13px; }
-            @media print { body { background: #fff; } .page { width: auto; margin: 0; min-height: auto; box-shadow: none; } }
+            body { font-family: Arial, Helvetica, sans-serif; margin: 0; background: #efefef; color: #111827; }
+            .page { width: 860px; margin: 18px auto; background: #fff; min-height: 1120px; box-shadow: 0 20px 60px rgba(0,0,0,.18); }
+            .top { display:flex; min-height:122px; background:#335f76; color:#fff; }
+            .mark { width:210px; position:relative; background:#fff; overflow:hidden; }
+            .tri1,.tri2,.tri3 { position:absolute; width:0; height:0; border-style:solid; }
+            .tri1 { left:24px; top:8px; border-width:0 55px 95px 0; border-color:transparent #f0b35f transparent transparent; transform:skew(-10deg); }
+            .tri2 { left:86px; top:8px; border-width:95px 55px 0 0; border-color:#d9973f transparent transparent transparent; transform:skew(-10deg); }
+            .tri3 { left:32px; top:0; border-width:0 72px 120px 0; border-color:transparent #335f76 transparent transparent; opacity:.92; transform:translateX(-30px) skew(-10deg); }
+            .brand { flex:1; padding:26px 30px; }
+            .brand h1 { margin:0; font-size:28px; letter-spacing:.5px; text-transform:uppercase; }
+            .brand p { margin:9px 0 0; font-size:13px; line-height:1.5; opacity:.95; }
+            .invoice-title { width:250px; text-align:right; padding:28px 30px; }
+            .invoice-title h2 { margin:0; font-size:32px; color:#20a386; letter-spacing:1px; }
+            .invoice-title div { margin-top:8px; font-size:13px; font-weight:700; }
+            .band { background:#ffe0b5; padding:26px 42px; }
+            .band h3 { margin:0; font-size:30px; letter-spacing:.5px; color:#111; }
+            .info { display:grid; grid-template-columns:1fr 1fr; gap:26px; padding:26px 42px 8px; }
+            .box-title { background:#efb261; color:#111; font-weight:900; text-transform:uppercase; padding:12px 16px; font-size:15px; letter-spacing:.3px; }
+            .box-body { padding:16px 18px; font-size:13.5px; line-height:1.55; border-left:1px solid #f1d2a3; border-right:1px solid #f1d2a3; border-bottom:1px solid #f1d2a3; min-height:125px; }
+            .items { padding:18px 42px 0; }
+            table { width:100%; border-collapse:collapse; font-size:13.5px; }
+            th { background:#335f76; color:#fff; padding:13px 12px; text-transform:uppercase; border:2px solid #111; font-size:13px; }
+            td { padding:13px 12px; border:2px solid #111; }
+            .right { text-align:right; } .center { text-align:center; }
+            .summary { width:48%; margin-left:auto; margin-top:0; }
+            .summary td { background:#dff0fa; font-weight:700; }
+            .summary .grand td { background:#335f76; color:#fff; font-size:18px; font-weight:900; }
+            .terms { padding:26px 42px 0; font-size:13px; line-height:1.45; }
+            .signature { display:flex; justify-content:space-between; padding:42px 42px 24px; font-size:13px; }
+            .sign { width:220px; border-top:2px solid #111; padding-top:8px; text-align:center; }
+            .thanks { font-weight:900; margin-top:18px; }
+            @media print { body{background:#fff}.page{width:auto;margin:0;box-shadow:none;min-height:auto}.top{print-color-adjust:exact;-webkit-print-color-adjust:exact} th,.grand td,.box-title,.band{print-color-adjust:exact;-webkit-print-color-adjust:exact} }
           </style>
         </head>
         <body>
           <div class="page">
             <div class="top">
+              <div class="mark"><div class="tri3"></div><div class="tri1"></div><div class="tri2"></div></div>
               <div class="brand">
-                <div class="mark"><span class="tri1"></span><span class="tri2"></span><span class="tri3"></span></div>
-                <div>
-                  <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
-                  <p>${safeText(entreprise?.adresse || "")}<br/>${entreprise?.telephone ? "Tél : " + safeText(entreprise.telephone) + "<br/>" : ""}${entreprise?.email ? "Email : " + safeText(entreprise.email) : ""}</p>
-                </div>
+                <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
+                <p>${safeText(entreprise?.adresse || "")}${entreprise?.telephone ? `<br/>Tél : ${safeText(entreprise.telephone)}` : ""}${entreprise?.email ? `<br/>Email : ${safeText(entreprise.email)}` : ""}</p>
               </div>
-              <div class="invoice-meta">
-                Invoice # : ${safeText(ref)}<br/>
-                Date : ${safeText(formatDateFr(dateFacture))}<br/>
-                Statut : ${safeText(statut)}
+              <div class="invoice-title">
+                <h2>FACTURE</h2>
+                <div>N° ${safeText(ref)}</div>
+                <div>Date : ${safeText(formatDateFr(dateFacture))}</div>
               </div>
             </div>
-
-            <div class="title-band"><h2>Facture professionnelle</h2></div>
-
-            <div class="info-area">
-              <div class="info-card">
-                <div class="info-head">Facturé à :</div>
-                <div class="info-body">
-                  <strong>${safeText(c?.nom || "Client non renseigné")}</strong><br/>
-                  ${c?.telephone ? "Tél : " + safeText(c.telephone) + "<br/>" : ""}
-                  ${c?.email ? "Email : " + safeText(c.email) + "<br/>" : ""}
-                  ${c?.adresse ? "Adresse : " + safeText(c.adresse) : ""}
-                </div>
-              </div>
-              <div class="info-card">
-                <div class="info-head">Détails de paiement :</div>
-                <div class="info-body">
-                  <strong>Référence :</strong> ${safeText(ref)}<br/>
-                  <strong>Mode :</strong> ${safeText(mode)}<br/>
-                  <strong>Produits :</strong> ${lignesFinales.length}<br/>
-                  <strong>Montant payé :</strong> ${safeText(fmt(montantPaye))}<br/>
-                  <strong>Reste à payer :</strong> ${safeText(fmt(reste))}
-                </div>
-              </div>
+            <div class="band"><h3>FACTURE PROFESSIONNELLE</h3></div>
+            <div class="info">
+              <div><div class="box-title">Facturé à :</div><div class="box-body"><strong>${safeText(c?.nom || "Client non renseigné")}</strong>${c?.telephone ? `<br/>Téléphone : ${safeText(c.telephone)}` : ""}${c?.email ? `<br/>Email : ${safeText(c.email)}` : ""}${c?.adresse ? `<br/>Adresse : ${safeText(c.adresse)}` : ""}</div></div>
+              <div><div class="box-title">Détails :</div><div class="box-body"><strong>Référence :</strong> ${safeText(ref)}<br/><strong>Mode de paiement :</strong> ${safeText(v.mode_paiement || "Espèces")}<br/><strong>Statut :</strong> ${safeText(v.statut || "validée")}<br/><strong>Produits :</strong> ${lignesFinales.length}<br/><strong>Montant payé :</strong> ${safeText(fmt(montantPaye))}<br/><strong>Reste à payer :</strong> ${safeText(fmt(reste))}</div></div>
             </div>
-
-            <div class="content">
-              <table>
-                <thead>
-                  <tr><th style="width:55px" class="center">#</th><th>Produit</th><th style="width:95px" class="center">Qté</th><th style="width:155px" class="right">Prix unitaire</th><th style="width:165px" class="right">Montant</th></tr>
-                </thead>
-                <tbody>${rows}</tbody>
-              </table>
-
-              <div class="summary">
-                <div class="summary-row"><div>Sous-total</div><div class="right">${safeText(fmt(total))}</div></div>
-                <div class="summary-row"><div>Remise</div><div class="right">0 FCFA</div></div>
-                <div class="summary-row"><div>Montant payé</div><div class="right">${safeText(fmt(montantPaye))}</div></div>
-                <div class="summary-row"><div>Reste à payer</div><div class="right">${safeText(fmt(reste))}</div></div>
-                <div class="summary-row total"><div>Total dû</div><div class="right">${safeText(fmt(total))}</div></div>
-              </div>
-
-              <div class="terms"><strong>Conditions de paiement :</strong><br/>Facture générée par Suivi PME. Merci de conserver ce document comme justificatif.</div>
-              <div class="signature"><div class="signature-box">Signature / Cachet</div><div class="signature-box">Client</div></div>
-              <div class="footer">Merci pour votre confiance.</div>
+            <div class="items">
+              <table><thead><tr><th>#</th><th>Produit</th><th>Qté</th><th>Prix unitaire</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
+              <table class="summary"><tbody><tr><td>Sous-total</td><td class="right">${safeText(fmt(total))}</td></tr><tr><td>Remise</td><td class="right">0 FCFA</td></tr><tr class="grand"><td>Total à payer</td><td class="right">${safeText(fmt(total))}</td></tr></tbody></table>
             </div>
+            <div class="terms"><strong>Conditions de paiement :</strong><br/>Merci de conserver cette facture. Tout paiement partiel reste suivi dans Suivi PME jusqu’au règlement complet.<div class="thanks">Merci pour votre confiance.</div></div>
+            <div class="signature"><div class="sign">Signature / Cachet</div><div>Facture générée par <strong>Suivi PME</strong></div></div>
           </div>
           <script>window.print()</script>
         </body>
@@ -3908,7 +3871,7 @@ function renderVentesTable(ventes, produits, clients, cell, deleteRow, imprimerF
         return (
           <tr key={v.id} style={{ borderTop: `1px solid ${INK}0D` }}>
             <td style={cell}>{v.date_vente}</td>
-            <td style={cell}>{v.reference || factureReferenceGroupe(v)}</td>
+            <td style={cell}>{factureReferenceGroupe(v)}</td>
             <td style={cell}>{c?.nom || "Client non renseigné"}</td>
             <td style={cell}>{produitsText}</td>
             <td style={cell}>{qte}</td>
