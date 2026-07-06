@@ -157,8 +157,12 @@ const factureReference = (vente) => {
 
 const factureReferenceGroupe = (vente) => {
   const ref = factureReference(vente);
-  // Corrige les anciennes références créées par ligne : FAC-2026-123456-1 -> FAC-2026-123456
-  return String(ref || "").replace(/-\d+$/, "");
+  const value = String(ref || "");
+  // Corrige uniquement les anciennes références créées par ligne :
+  // FAC-2026-123456-1 -> FAC-2026-123456
+  // Important : ne pas transformer FAC-2026-123456 en FAC-2026.
+  const match = value.match(/^(FAC-\d{4}-\d{4,})-\d+$/);
+  return match ? match[1] : value;
 };
 
 const buildFactureGroups = (ventes, produits, clients) => {
@@ -1964,7 +1968,11 @@ export default function App() {
         quantite: l.quantite,
         prix_unitaire: l.prix_unitaire,
         utilisateur_id: profil.id,
-        reference: baseRef,
+        // Une vente multi-produits reste une seule facture.
+        // Si la base possède encore une contrainte unique sur reference,
+        // chaque ligne garde un suffixe technique (-1, -2, -3), mais l'application
+        // regroupe toujours ces lignes sous la facture affichée baseRef.
+        reference: `${baseRef}-${index + 1}`,
         statut: resteLigne <= 0 ? "payée" : "validée",
         mode_paiement: venteForm.mode_paiement || "Espèces",
         type_vente: typeVente,
@@ -2375,22 +2383,43 @@ export default function App() {
   }
   function imprimerFacture(v) {
     const isGroupe = Array.isArray(v?.lignes);
+    const ref = v.reference || factureReferenceGroupe(v);
     const lignes = isGroupe
       ? v.lignes
-      : ventes.filter((x) => factureReferenceGroupe(x) === factureReferenceGroupe(v) && x.client_id === v.client_id).map((x) => ({ ...x, produit: produits.find((p) => p.id === x.produit_id), total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0) }));
-    const lignesFinales = lignes.length ? lignes : [{ ...v, produit: produits.find((x) => x.id === v.produit_id), total: Number(v.quantite || 0) * Number(v.prix_unitaire || 0) }];
+      : ventes
+          .filter((x) => factureReferenceGroupe(x) === factureReferenceGroupe(v) && x.client_id === v.client_id)
+          .map((x) => ({
+            ...x,
+            produit: produits.find((p) => p.id === x.produit_id),
+            total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0)
+          }));
+
+    const lignesFinales = lignes.length
+      ? lignes
+      : [{ ...v, produit: produits.find((x) => x.id === v.produit_id), total: Number(v.quantite || 0) * Number(v.prix_unitaire || 0) }];
+
     const c = v.client || clients.find((x) => x.id === v.client_id);
-    const total = isGroupe ? Number(v.total || 0) : lignesFinales.reduce((s, l) => s + Number(l.total || 0), 0);
+    const total = lignesFinales.reduce((s, l) => s + Number(l.total || (Number(l.quantite || 0) * Number(l.prix_unitaire || 0))), 0);
     const montantPaye = isGroupe ? Number(v.montant_paye || 0) : lignesFinales.reduce((s, l) => s + Number(l.montant_paye || 0), 0);
-    const reste = isGroupe ? Number(v.reste_a_payer || 0) : Math.max(total - montantPaye, 0);
-    const ref = v.reference || factureReferenceGroupe(v);
-    const rows = lignesFinales.map((l) => `
-      <tr>
-        <td>${safeText(l.produit?.nom || produits.find(p => p.id === l.produit_id)?.nom || "Produit")}</td>
-        <td class="right">${safeText(l.quantite)}</td>
-        <td class="right">${safeText(fmt(l.prix_unitaire))}</td>
-        <td class="right"><strong>${safeText(fmt(Number(l.quantite || 0) * Number(l.prix_unitaire || 0)))}</strong></td>
-      </tr>`).join("");
+    const reste = Math.max(total - montantPaye, 0);
+    const statut = reste <= 0 ? "payée" : (v.statut || "validée");
+    const dateFacture = v.date_vente || String(v.created_at || today()).slice(0, 10);
+    const mode = v.mode_paiement || "Espèces";
+
+    const rows = lignesFinales.map((l, i) => {
+      const nomProduit = l.produit?.nom || produits.find(p => p.id === l.produit_id)?.nom || "Produit";
+      const qte = Number(l.quantite || 0);
+      const pu = Number(l.prix_unitaire || 0);
+      const ligneTotal = Number(l.total || qte * pu);
+      return `
+        <tr>
+          <td class="center">${i + 1}</td>
+          <td>${safeText(nomProduit)}</td>
+          <td class="center">${safeText(qte)}</td>
+          <td class="right">${safeText(fmt(pu))}</td>
+          <td class="right"><strong>${safeText(fmt(ligneTotal))}</strong></td>
+        </tr>`;
+    }).join("");
 
     const html = `
       <html>
@@ -2398,84 +2427,103 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { font-family: Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
-            .page { width: 800px; margin: 24px auto; background: white; padding: 38px; border-radius: 12px; }
-            .header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 4px solid #1E7F6E; padding-bottom: 18px; }
-            .brand h1 { margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: .5px; }
-            .brand div { margin-top: 6px; font-size: 13px; color: #5b6472; line-height: 1.45; }
-            .badge { text-align: right; }
-            .badge h2 { margin: 0; color: #1E7F6E; font-size: 26px; }
-            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; }
-            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
-            .box { border: 1px solid #e2e6ea; border-radius: 10px; padding: 14px; min-height: 110px; }
-            .box-title { font-size: 12px; text-transform: uppercase; color: #1E7F6E; font-weight: bold; margin-bottom: 10px; letter-spacing: .4px; }
-            .line { font-size: 14px; margin: 5px 0; line-height: 1.35; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 12px; text-transform: uppercase; }
-            td { padding: 13px 12px; border-bottom: 1px solid #e8eaee; font-size: 14px; }
+            body { font-family: Arial, Helvetica, sans-serif; margin: 0; background: #f3f4f6; color: #111827; }
+            .page { width: 860px; margin: 18px auto; background: #fff; min-height: 1120px; box-shadow: 0 18px 45px rgba(15, 23, 42, .18); }
+            .top { display: grid; grid-template-columns: 1.3fr .9fr; background: #123955; color: #fff; padding: 28px 36px; align-items: center; }
+            .brand { display: flex; align-items: center; gap: 18px; }
+            .mark { width: 86px; height: 70px; position: relative; }
+            .tri1, .tri2, .tri3 { position: absolute; width: 0; height: 0; border-style: solid; }
+            .tri1 { left: 0; top: 0; border-width: 0 34px 58px 34px; border-color: transparent transparent #f0b45d transparent; }
+            .tri2 { left: 34px; top: 0; border-width: 58px 34px 0 34px; border-color: #e9eef3 transparent transparent transparent; }
+            .tri3 { left: 17px; top: 32px; border-width: 0 34px 58px 34px; border-color: transparent transparent #fff transparent; opacity: .9; transform: rotate(180deg); }
+            .brand h1 { margin: 0; font-size: 25px; letter-spacing: .5px; text-transform: uppercase; }
+            .brand p { margin: 7px 0 0; font-size: 12px; opacity: .9; line-height: 1.5; }
+            .invoice-meta { text-align: right; font-size: 13px; line-height: 1.7; font-weight: 700; }
+            .title-band { background: #fde0b7; padding: 30px 36px 24px; }
+            .title-band h2 { margin: 0; font-size: 34px; letter-spacing: .7px; text-transform: uppercase; color: #0f172a; }
+            .info-area { background: #fde0b7; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 0 36px 30px; }
+            .info-card { background: rgba(255,255,255,.25); border: 1px solid rgba(15,23,42,.12); }
+            .info-head { background: #f0b45d; color: #111827; padding: 11px 16px; font-weight: 900; text-transform: uppercase; font-size: 15px; }
+            .info-body { padding: 16px; font-size: 13px; line-height: 1.55; }
+            .content { padding: 30px 36px 24px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 0; }
+            th { background: #123955; color: #fff; text-align: left; padding: 13px 12px; font-size: 12px; text-transform: uppercase; border: 2px solid #0f2e45; letter-spacing: .3px; }
+            td { padding: 13px 12px; border: 2px solid #111827; font-size: 13px; background: #fff; }
             .right { text-align: right; }
-            .total-box { margin-left: auto; margin-top: 22px; width: 360px; border: 2px solid #1E7F6E; border-radius: 10px; padding: 14px 16px; }
-            .total-line { display:flex; justify-content:space-between; margin: 8px 0; font-size: 14px; }
-            .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 22px; font-weight: bold; color: #1E7F6E; border-top: 1px solid #dce5e2; padding-top: 10px; margin-top: 10px; }
-            .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; }
-            .signature { margin-top: 36px; display: flex; justify-content: flex-end; }
-            .signature div { width: 220px; border-top: 1px solid #152238; padding-top: 8px; text-align: center; font-size: 13px; }
-            @media print { body { background: white; } .page { width: auto; margin: 0; border-radius: 0; box-shadow: none; } }
+            .center { text-align: center; }
+            .summary { width: 360px; margin-left: auto; margin-top: 0; border-left: 2px solid #111827; border-right: 2px solid #111827; }
+            .summary-row { display: grid; grid-template-columns: 1fr 145px; border-bottom: 2px solid #111827; }
+            .summary-row div { padding: 13px 12px; background: #d9ecf7; font-size: 13px; }
+            .summary-row div:first-child { font-weight: 800; }
+            .summary-row.total div { background: #123955; color: #fff; font-size: 18px; font-weight: 900; }
+            .terms { margin-top: 28px; font-size: 13px; line-height: 1.55; }
+            .signature { margin-top: 46px; display: flex; justify-content: space-between; gap: 30px; font-size: 13px; }
+            .signature-box { width: 240px; border-top: 2px solid #111827; padding-top: 8px; text-align: center; }
+            .footer { margin-top: 30px; font-weight: 800; font-size: 13px; }
+            @media print { body { background: #fff; } .page { width: auto; margin: 0; min-height: auto; box-shadow: none; } }
           </style>
         </head>
         <body>
           <div class="page">
-            <div class="header">
+            <div class="top">
               <div class="brand">
-                <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
+                <div class="mark"><span class="tri1"></span><span class="tri2"></span><span class="tri3"></span></div>
                 <div>
-                  ${safeText(entreprise?.adresse || "")}<br/>
-                  ${entreprise?.telephone ? "Tél : " + safeText(entreprise.telephone) + "<br/>" : ""}
-                  ${entreprise?.email ? "Email : " + safeText(entreprise.email) + "<br/>" : ""}
-                  ${entreprise?.ninea ? "NINEA : " + safeText(entreprise.ninea) + "<br/>" : ""}
-                  ${entreprise?.rccm ? "RCCM : " + safeText(entreprise.rccm) : ""}
+                  <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
+                  <p>${safeText(entreprise?.adresse || "")}<br/>${entreprise?.telephone ? "Tél : " + safeText(entreprise.telephone) + "<br/>" : ""}${entreprise?.email ? "Email : " + safeText(entreprise.email) : ""}</p>
                 </div>
               </div>
-              <div class="badge">
-                <h2>FACTURE</h2>
-                <div>N° ${safeText(ref)}</div>
-                <div>Date : ${safeText(formatDateFr(v.date_vente))}</div>
+              <div class="invoice-meta">
+                Invoice # : ${safeText(ref)}<br/>
+                Date : ${safeText(formatDateFr(dateFacture))}<br/>
+                Statut : ${safeText(statut)}
               </div>
             </div>
 
-            <div class="grid">
-              <div class="box">
-                <div class="box-title">Facturé à</div>
-                <div class="line"><strong>${safeText(c?.nom || "Client non renseigné")}</strong></div>
-                ${c?.telephone ? `<div class="line">Tél : ${safeText(c.telephone)}</div>` : ""}
-                ${c?.email ? `<div class="line">Email : ${safeText(c.email)}</div>` : ""}
-                ${c?.adresse ? `<div class="line">Adresse : ${safeText(c.adresse)}</div>` : ""}
+            <div class="title-band"><h2>Facture professionnelle</h2></div>
+
+            <div class="info-area">
+              <div class="info-card">
+                <div class="info-head">Facturé à :</div>
+                <div class="info-body">
+                  <strong>${safeText(c?.nom || "Client non renseigné")}</strong><br/>
+                  ${c?.telephone ? "Tél : " + safeText(c.telephone) + "<br/>" : ""}
+                  ${c?.email ? "Email : " + safeText(c.email) + "<br/>" : ""}
+                  ${c?.adresse ? "Adresse : " + safeText(c.adresse) : ""}
+                </div>
               </div>
-              <div class="box">
-                <div class="box-title">Détails</div>
-                <div class="line"><strong>Référence :</strong> ${safeText(ref)}</div>
-                <div class="line"><strong>Mode :</strong> ${safeText(v.mode_paiement || "Espèces")}</div>
-                <div class="line"><strong>Statut :</strong> ${safeText(v.statut || "validée")}</div>
-                <div class="line"><strong>Produits :</strong> ${lignesFinales.length}</div>
-                <div class="line"><strong>Devise :</strong> FCFA</div>
+              <div class="info-card">
+                <div class="info-head">Détails de paiement :</div>
+                <div class="info-body">
+                  <strong>Référence :</strong> ${safeText(ref)}<br/>
+                  <strong>Mode :</strong> ${safeText(mode)}<br/>
+                  <strong>Produits :</strong> ${lignesFinales.length}<br/>
+                  <strong>Montant payé :</strong> ${safeText(fmt(montantPaye))}<br/>
+                  <strong>Reste à payer :</strong> ${safeText(fmt(reste))}
+                </div>
               </div>
             </div>
 
-            <table>
-              <thead>
-                <tr><th>Produit</th><th class="right">Qté</th><th class="right">Prix unitaire</th><th class="right">Total</th></tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
+            <div class="content">
+              <table>
+                <thead>
+                  <tr><th style="width:55px" class="center">#</th><th>Produit</th><th style="width:95px" class="center">Qté</th><th style="width:155px" class="right">Prix unitaire</th><th style="width:165px" class="right">Montant</th></tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
 
-            <div class="total-box">
-              <div class="total-line"><span>Montant payé</span><strong>${safeText(fmt(montantPaye))}</strong></div>
-              <div class="total-line"><span>Reste à payer</span><strong>${safeText(fmt(reste))}</strong></div>
-              <div class="total-row"><span>Total</span><span>${safeText(fmt(total))}</span></div>
+              <div class="summary">
+                <div class="summary-row"><div>Sous-total</div><div class="right">${safeText(fmt(total))}</div></div>
+                <div class="summary-row"><div>Remise</div><div class="right">0 FCFA</div></div>
+                <div class="summary-row"><div>Montant payé</div><div class="right">${safeText(fmt(montantPaye))}</div></div>
+                <div class="summary-row"><div>Reste à payer</div><div class="right">${safeText(fmt(reste))}</div></div>
+                <div class="summary-row total"><div>Total dû</div><div class="right">${safeText(fmt(total))}</div></div>
+              </div>
+
+              <div class="terms"><strong>Conditions de paiement :</strong><br/>Facture générée par Suivi PME. Merci de conserver ce document comme justificatif.</div>
+              <div class="signature"><div class="signature-box">Signature / Cachet</div><div class="signature-box">Client</div></div>
+              <div class="footer">Merci pour votre confiance.</div>
             </div>
-
-            <div class="signature"><div>Signature / Cachet</div></div>
-            <div class="footer">Merci pour votre confiance.<br/>Facture générée par Suivi PME.</div>
           </div>
           <script>window.print()</script>
         </body>
