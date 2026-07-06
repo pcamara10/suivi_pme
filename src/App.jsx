@@ -155,6 +155,12 @@ const factureReference = (vente) => {
   return `FAC-${annee}-${court}`;
 };
 
+const factureGroupKey = (vente) => {
+  const ref = factureReference(vente);
+  // Regroupe aussi les anciennes factures générées en FAC-2026-123456-1, FAC-2026-123456-2...
+  return String(ref || "").replace(/-\d+$/, "");
+};
+
 const safeText = (v) =>
   String(v ?? "")
     .replaceAll("&", "&amp;")
@@ -883,20 +889,60 @@ export default function App() {
   const ventesPageRows = useMemo(() => ventesFiltreesPro.slice((ventesPage - 1) * lignesParPagePro, ventesPage * lignesParPagePro), [ventesFiltreesPro, ventesPage]);
   const pagesVentes = Math.max(1, Math.ceil(ventesFiltreesPro.length / lignesParPagePro));
 
+  const facturesGroupeesPro = useMemo(() => {
+    const map = new Map();
+    ventes.forEach((v) => {
+      const key = `${v.client_id || "sans-client"}__${factureGroupKey(v)}`;
+      if (!map.has(key)) {
+        map.set(key, { ...v, id: key, reference: factureGroupKey(v), lignes: [], _ids: [] });
+      }
+      const g = map.get(key);
+      g.lignes.push(v);
+      g._ids.push(v.id);
+    });
+
+    return Array.from(map.values()).map((g) => {
+      const lignes = g.lignes || [];
+      const total = lignes.reduce((s, l) => s + Number(l.quantite || 0) * Number(l.prix_unitaire || 0), 0);
+      const paye = lignes.reduce((s, l) => s + Number(l.montant_paye || 0), 0);
+      const reste = lignes.reduce((s, l) => s + Number(l.reste_a_payer || 0), 0);
+      const produitsText = lignes.map((l) => {
+        const p = produits.find((x) => x.id === l.produit_id);
+        return `${p?.nom || "Produit"} x${Number(l.quantite || 0)}`;
+      }).join(", ");
+      const statut = lignes.some((l) => (l.statut || "validée") === "annulée")
+        ? "annulée"
+        : reste <= 0
+          ? "payée"
+          : (lignes[0]?.statut || "validée");
+      return {
+        ...g,
+        date_vente: lignes[0]?.date_vente || g.date_vente,
+        created_at: lignes[0]?.created_at || g.created_at,
+        mode_paiement: lignes[0]?.mode_paiement || "Espèces",
+        statut,
+        montant_paye: paye,
+        reste_a_payer: reste,
+        _total: total,
+        _produitsText: produitsText,
+        _quantiteTotal: lignes.reduce((s, l) => s + Number(l.quantite || 0), 0)
+      };
+    }).sort((a, b) => String(b.date_vente || b.created_at || "").localeCompare(String(a.date_vente || a.created_at || "")));
+  }, [ventes, produits]);
+
   const facturesFiltreesPro = useMemo(() => {
     const q = facturesSearch.trim().toLowerCase();
-    return ventes.filter(v => {
-      const p = produits.find(x => x.id === v.produit_id);
+    return facturesGroupeesPro.filter(v => {
       const c = clients.find(x => x.id === v.client_id);
       const statut = v.statut || "validée";
       const mode = v.mode_paiement || "Espèces";
       const matchDate = inDateRange(v.date_vente || v.created_at, facturesDateDebut, facturesDateFin);
       const matchMode = facturesModeFilter === "tous" || mode === facturesModeFilter;
       const matchStatut = facturesStatutFilter === "tous" || statut === facturesStatutFilter;
-      const matchSearch = !q || [v.date_vente, factureReference(v), c?.nom, p?.nom, statut, mode, v.montant_paye, v.reste_a_payer, Number(v.quantite || 0) * Number(v.prix_unitaire || 0)].some(x => String(x || "").toLowerCase().includes(q));
+      const matchSearch = !q || [v.date_vente, v.reference, c?.nom, v._produitsText, statut, mode, v.montant_paye, v.reste_a_payer, v._total].some(x => String(x || "").toLowerCase().includes(q));
       return matchDate && matchMode && matchStatut && matchSearch;
     });
-  }, [ventes, facturesSearch, produits, clients, facturesDateDebut, facturesDateFin, facturesModeFilter, facturesStatutFilter]);
+  }, [facturesGroupeesPro, facturesSearch, clients, facturesDateDebut, facturesDateFin, facturesModeFilter, facturesStatutFilter]);
   const facturesPageRows = useMemo(() => facturesFiltreesPro.slice((facturesPage - 1) * lignesParPagePro, facturesPage * lignesParPagePro), [facturesFiltreesPro, facturesPage]);
   const pagesFactures = Math.max(1, Math.ceil(facturesFiltreesPro.length / lignesParPagePro));
 
@@ -1913,7 +1959,7 @@ export default function App() {
         quantite: l.quantite,
         prix_unitaire: l.prix_unitaire,
         utilisateur_id: profil.id,
-        reference: lignesValides.length > 1 ? `${baseRef}-${index + 1}` : baseRef,
+        reference: baseRef,
         statut: resteLigne <= 0 ? "payée" : "validée",
         mode_paiement: venteForm.mode_paiement || "Espèces",
         type_vente: typeVente,
@@ -2013,7 +2059,7 @@ export default function App() {
       quantite: Number(l.quantite),
       prix_unitaire: Number(l.prix_unitaire),
       utilisateur_id: profil.id,
-      reference: lignes.length > 1 ? `${baseRef}-${index + 1}` : baseRef,
+      reference: baseRef,
       statut: "validée",
       mode_paiement: "Espèces"
     }));
@@ -2049,7 +2095,8 @@ export default function App() {
   }
 
   async function changerStatutFacture(v, statut) {
-    const { error } = await supabase.from("ventes").update({ statut }).eq("id", v.id);
+    const ids = v._ids?.length ? v._ids : [v.id];
+    const { error } = await supabase.from("ventes").update({ statut }).in("id", ids);
     if (error) return showError(error, "Impossible de changer le statut de la facture.");
     setMessage(`Facture ${statut}.`);
     chargerDonnees();
@@ -2057,19 +2104,21 @@ export default function App() {
 
   async function dupliquerFacture(v) {
     const reference = `FAC-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
-    const { error } = await supabase.from("ventes").insert({
+    const lignes = v.lignes?.length ? v.lignes : [v];
+    const payload = lignes.map((ligne) => ({
       entreprise_id: entreprise.id,
-      produit_id: v.produit_id,
-      client_id: v.client_id || null,
-      quantite: Number(v.quantite),
-      prix_unitaire: Number(v.prix_unitaire),
+      produit_id: ligne.produit_id,
+      client_id: ligne.client_id || null,
+      quantite: Number(ligne.quantite),
+      prix_unitaire: Number(ligne.prix_unitaire),
       utilisateur_id: profil.id,
       reference,
       statut: "brouillon",
-      mode_paiement: v.mode_paiement || null
-    });
+      mode_paiement: ligne.mode_paiement || v.mode_paiement || null
+    }));
+    const { error } = await supabase.from("ventes").insert(payload);
     if (error) return showError(error, "Impossible de dupliquer la facture.");
-    setMessage("Facture dupliquée en brouillon.");
+    setMessage("Facture dupliquée en brouillon avec tous ses produits.");
     chargerDonnees();
   }
 
@@ -2325,10 +2374,31 @@ export default function App() {
     if (error) showError(error, "Impossible de modifier les paramètres."); else { setMessage("Paramètres enregistrés."); chargerProfilEtEntreprise(); }
   }
   function imprimerFacture(v) {
-    const p = produits.find((x) => x.id === v.produit_id);
+    const ref = factureGroupKey(v);
+    const lignesFacture = ventes.filter((x) => factureGroupKey(x) === ref && (x.client_id || null) === (v.client_id || null));
+    const lignes = lignesFacture.length ? lignesFacture : (v.lignes?.length ? v.lignes : [v]);
     const c = clients.find((x) => x.id === v.client_id);
-    const total = Number(v.quantite) * Number(v.prix_unitaire);
-    const ref = factureReference(v);
+    const total = lignes.reduce((s, ligne) => s + Number(ligne.quantite || 0) * Number(ligne.prix_unitaire || 0), 0);
+    const totalPaye = lignes.reduce((s, ligne) => s + Number(ligne.montant_paye || 0), 0);
+    const reste = lignes.reduce((s, ligne) => s + Number(ligne.reste_a_payer || 0), 0);
+    const statutFacture = lignes.some((ligne) => (ligne.statut || "validée") === "annulée") ? "annulée" : (reste <= 0 ? "payée" : (v.statut || "validée"));
+
+    if (reste > 0) {
+      const continuer = window.confirm(`Cette facture n'est pas totalement payée.\nReste à payer : ${fmt(reste)}.\n\nVoulez-vous quand même l'imprimer ?`);
+      if (!continuer) return;
+    }
+
+    const lignesHtml = lignes.map((ligne, idx) => {
+      const p = produits.find((x) => x.id === ligne.produit_id);
+      const ligneTotal = Number(ligne.quantite || 0) * Number(ligne.prix_unitaire || 0);
+      return `<tr>
+        <td>${idx + 1}</td>
+        <td>${safeText(p?.nom || "Produit")}</td>
+        <td class="right">${safeText(ligne.quantite)}</td>
+        <td class="right">${safeText(fmt(ligne.prix_unitaire))}</td>
+        <td class="right"><strong>${safeText(fmt(ligneTotal))}</strong></td>
+      </tr>`;
+    }).join("");
 
     const html = `
       <html>
@@ -2336,24 +2406,26 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { font-family: Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
-            .page { width: 800px; margin: 24px auto; background: white; padding: 38px; border-radius: 12px; }
+            body { font-family: Inter, Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
+            .page { width: 860px; margin: 24px auto; background: white; padding: 38px; border-radius: 18px; box-shadow: 0 24px 70px rgba(21,34,56,.13); }
             .header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 4px solid #1E7F6E; padding-bottom: 18px; }
             .brand h1 { margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: .5px; }
             .brand div { margin-top: 6px; font-size: 13px; color: #5b6472; line-height: 1.45; }
             .badge { text-align: right; }
-            .badge h2 { margin: 0; color: #1E7F6E; font-size: 26px; }
+            .badge h2 { margin: 0; color: #1E7F6E; font-size: 30px; letter-spacing: .8px; }
             .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
-            .box { border: 1px solid #e2e6ea; border-radius: 10px; padding: 14px; min-height: 110px; }
+            .box { border: 1px solid #e2e6ea; border-radius: 14px; padding: 14px; min-height: 110px; background: #F8FAFC; }
             .box-title { font-size: 12px; text-transform: uppercase; color: #1E7F6E; font-weight: bold; margin-bottom: 10px; letter-spacing: .4px; }
             .line { font-size: 14px; margin: 5px 0; line-height: 1.35; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 12px; text-transform: uppercase; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; border-radius: 14px; overflow: hidden; }
+            th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
             td { padding: 13px 12px; border-bottom: 1px solid #e8eaee; font-size: 14px; }
+            tbody tr:nth-child(even) { background: #F8FAFC; }
             .right { text-align: right; }
-            .total-box { margin-left: auto; margin-top: 22px; width: 330px; border: 2px solid #1E7F6E; border-radius: 10px; padding: 14px 16px; }
-            .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 22px; font-weight: bold; color: #1E7F6E; }
+            .total-box { margin-left: auto; margin-top: 22px; width: 360px; border: 2px solid #1E7F6E; border-radius: 14px; padding: 14px 16px; background: #ECFDF5; }
+            .total-line { display:flex; justify-content:space-between; margin: 6px 0; font-size: 14px; }
+            .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 24px; font-weight: bold; color: #1E7F6E; border-top: 1px solid #1E7F6E33; padding-top: 10px; margin-top: 10px; }
             .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; }
             .signature { margin-top: 36px; display: flex; justify-content: flex-end; }
             .signature div { width: 220px; border-top: 1px solid #152238; padding-top: 8px; text-align: center; font-size: 13px; }
@@ -2376,7 +2448,8 @@ export default function App() {
               <div class="badge">
                 <h2>FACTURE</h2>
                 <div>N° ${safeText(ref)}</div>
-                <div>Date : ${safeText(formatDateFr(v.date_vente))}</div>
+                <div>Date & heure : ${safeText(formatDateTimeFr(v.date_vente || v.created_at))}</div>
+                <div>Statut : ${safeText(statutFacture)}</div>
               </div>
             </div>
 
@@ -2389,52 +2462,45 @@ export default function App() {
                 ${c?.adresse ? `<div class="line">Adresse : ${safeText(c.adresse)}</div>` : ""}
               </div>
               <div class="box">
-                <div class="box-title">Détails</div>
-                <div class="line"><strong>Référence :</strong> ${safeText(ref)}</div>
-                <div class="line"><strong>Mode :</strong> ${safeText(v.mode_paiement || "Espèces")}</div>
-                <div class="line"><strong>Statut :</strong> ${safeText(v.statut || "validée")}</div>\n                <div class="line"><strong>Montant payé :</strong> ${safeText(fmt(v.montant_paye || 0))}</div>\n                <div class="line"><strong>Reste à payer :</strong> ${safeText(fmt(v.reste_a_payer || 0))}</div>
-                <div class="line"><strong>Devise :</strong> FCFA</div>
+                <div class="box-title">Détails paiement</div>
+                <div class="line">Mode : <strong>${safeText(v.mode_paiement || "Espèces")}</strong></div>
+                <div class="line">Montant payé : <strong>${safeText(fmt(totalPaye))}</strong></div>
+                <div class="line">Reste à payer : <strong>${safeText(fmt(reste))}</strong></div>
               </div>
             </div>
 
             <table>
               <thead>
                 <tr>
+                  <th>#</th>
                   <th>Produit</th>
                   <th class="right">Qté</th>
                   <th class="right">Prix unitaire</th>
                   <th class="right">Total</th>
                 </tr>
               </thead>
-              <tbody>
-                <tr>
-                  <td>${safeText(p?.nom || "Produit")}</td>
-                  <td class="right">${safeText(v.quantite)}</td>
-                  <td class="right">${safeText(fmt(v.prix_unitaire))}</td>
-                  <td class="right"><strong>${safeText(fmt(total))}</strong></td>
-                </tr>
-              </tbody>
+              <tbody>${lignesHtml}</tbody>
             </table>
 
             <div class="total-box">
-              <div class="total-row">
-                <span>Total</span>
-                <span>${safeText(fmt(total))}</span>
-              </div>
+              <div class="total-line"><span>Sous-total</span><strong>${safeText(fmt(total))}</strong></div>
+              <div class="total-line"><span>Payé</span><strong>${safeText(fmt(totalPaye))}</strong></div>
+              <div class="total-line"><span>Reste</span><strong>${safeText(fmt(reste))}</strong></div>
+              <div class="total-row"><span>Net à payer</span><span>${safeText(fmt(total))}</span></div>
             </div>
 
             <div class="signature"><div>Signature / Cachet</div></div>
-            <div class="footer">Merci pour votre confiance.<br/>Facture générée par Suivi PME.</div>
+            <div class="footer">Merci pour votre confiance — ${safeText(entreprise?.nom || "Suivi PME")}</div>
           </div>
           <script>window.print()</script>
         </body>
       </html>
     `;
-
     const w = window.open("", "_blank");
     w.document.write(html);
     w.document.close();
   }
+
 
   function imprimerDocumentSimple(type, ref, tiers, montant, date) {
     const html = `<html><head><title>${safeText(ref)}</title><style>body{font-family:Arial;background:#f4f4f4;margin:0;color:#152238}.page{width:800px;margin:24px auto;background:#fff;padding:38px;border-radius:12px}.head{display:flex;justify-content:space-between;border-bottom:4px solid #1E7F6E;padding-bottom:18px}h1{margin:0;text-transform:uppercase}.ref{text-align:right;color:#1E7F6E;font-size:22px;font-weight:bold}.box{border:1px solid #ddd;border-radius:10px;padding:14px;margin:22px 0}.total{font-size:24px;color:#1E7F6E;font-weight:bold;text-align:right;margin-top:30px}@media print{body{background:#fff}.page{margin:0;width:auto}}</style></head><body><div class="page"><div class="head"><div><h1>${safeText(entreprise?.nom || "Suivi PME")}</h1><div>${safeText(entreprise?.adresse || "")}<br/>${safeText(entreprise?.telephone || "")}</div></div><div class="ref">${safeText(type)}<br/>${safeText(ref)}</div></div><div class="box"><b>Date :</b> ${safeText(formatDateFr(date))}<br/><b>Client :</b> ${safeText(tiers || "Non renseigné")}</div><div class="total">Total : ${safeText(fmt(montant))}</div><br/><br/><div style="text-align:right">Signature / Cachet</div></div><script>window.print()</script></body></html>`;
@@ -3641,7 +3707,7 @@ const { error } = await supabase.from("messagerie_saas").insert({
         {tab === "stocks" && <><SectionTitle title="Produits / Stock avancé & Inventaire" sub="Produits, catégories, mouvements, inventaires et alertes de stock." /><div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:18 }}><KpiCard label="Valeur stock achat" value={fmt(valeurStock)} icon={Package} accent={INK} /><KpiCard label="Valeur stock vente" value={fmt(valeurVenteStock)} icon={TrendingUp} accent={TEAL} /><KpiCard label="Stock bas" value={produitsAlerte.length} icon={AlertTriangle} accent={MUSTARD} /><KpiCard label="Ruptures" value={produitsRupture.length} icon={AlertTriangle} accent={CORAL} /></div><form onSubmit={saveCategorie} style={formStyle(CARD, INK)}><Field label="Catégorie"><input required placeholder="Ex : Alimentaire, Téléphonie..." style={{...inputStyle,minWidth:220}} value={categorieForm.nom} onChange={e=>setCategorieForm({...categorieForm,nom:e.target.value})}/></Field><Button type="submit"><Plus size={15}/> {categorieForm.id ? "Modifier catégorie" : "Ajouter catégorie"}</Button>{categorieForm.id && <Button secondary onClick={()=>setCategorieForm({id:null,nom:""})}>Annuler</Button>}</form><Table headers={["Catégorie","Actions"]}>{categories.map(c=><tr key={c.id} style={{borderTop:`1px solid ${INK}0D`}}><td style={cell}>{c.nom}</td><td style={cell}><button onClick={()=>setCategorieForm(c)} style={linkBtn(TEAL)}>Modifier</button><button onClick={()=>deleteRow("categories",c.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>)}</Table><div style={{height:18}}/><form onSubmit={saveProduit} style={formStyle(CARD, INK)}><Field label="Nom produit"><input required style={{...inputStyle,minWidth:190}} value={produitForm.nom} onChange={e=>setProduitForm({...produitForm,nom:e.target.value})}/></Field><Field label="Catégorie"><select style={{...inputStyle,minWidth:170}} value={produitForm.categorie_id||""} onChange={e=>setProduitForm({...produitForm,categorie_id:e.target.value})}><option value="">Non classé</option>{categories.map(c=><option key={c.id} value={c.id}>{c.nom}</option>)}</select></Field><Field label="Code-barres"><input style={{...inputStyle,minWidth:150}} value={produitForm.code_barres||""} onChange={e=>setProduitForm({...produitForm,code_barres:e.target.value})}/></Field><Field label="Image URL"><input style={{...inputStyle,minWidth:180}} value={produitForm.image_url||""} onChange={e=>setProduitForm({...produitForm,image_url:e.target.value})}/></Field><Field label="Quantité"><input type="number" min="0" style={{...inputStyle,width:105}} value={produitForm.quantite} onChange={e=>setProduitForm({...produitForm,quantite:e.target.value})}/></Field><Field label="Seuil"><input type="number" min="0" style={{...inputStyle,width:105}} value={produitForm.seuil_alerte} onChange={e=>setProduitForm({...produitForm,seuil_alerte:e.target.value})}/></Field><Field label="Prix achat"><input type="number" min="0" style={{...inputStyle,width:115}} value={produitForm.prix_achat} onChange={e=>setProduitForm({...produitForm,prix_achat:e.target.value})}/></Field><Field label="Prix vente"><input type="number" min="0" style={{...inputStyle,width:115}} value={produitForm.prix_vente} onChange={e=>setProduitForm({...produitForm,prix_vente:e.target.value})}/></Field><Button type="submit"><Plus size={15}/> {produitForm.id ? "Modifier" : "Ajouter"}</Button>{produitForm.id && <Button secondary onClick={()=>setProduitForm(emptyProduit)}>Annuler</Button>}</form><SectionTitle title="Inventaire physique" sub="Corrigez le stock réel après comptage." /><form onSubmit={saveInventaire} style={formStyle(CARD, INK)}><Field label="Produit"><select required style={{...inputStyle,minWidth:220}} value={inventaireForm.produit_id} onChange={e=>setInventaireForm({...inventaireForm,produit_id:e.target.value})}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom} — Stock système: {p.quantite}</option>)}</select></Field><Field label="Stock physique"><input type="number" min="0" required style={{...inputStyle,width:140}} value={inventaireForm.stock_physique} onChange={e=>setInventaireForm({...inventaireForm,stock_physique:e.target.value})}/></Field><Button type="submit"><Save size={15}/> Valider inventaire</Button></form><SectionTitle title="Mouvement de stock" sub="Entrée, sortie, ajustement, retour client ou retour fournisseur." /><form onSubmit={saveMouvementStock} style={formStyle(CARD, INK)}><Field label="Produit"><select required style={{...inputStyle,minWidth:220}} value={mouvementStockForm.produit_id} onChange={e=>setMouvementStockForm({...mouvementStockForm,produit_id:e.target.value})}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom} — Stock: {p.quantite}</option>)}</select></Field><Field label="Type"><select style={inputStyle} value={mouvementStockForm.type_mouvement} onChange={e=>setMouvementStockForm({...mouvementStockForm,type_mouvement:e.target.value})}><option value="entree">Entrée</option><option value="sortie">Sortie</option><option value="ajustement">Ajustement stock final</option><option value="retour_client">Retour client</option><option value="retour_fournisseur">Retour fournisseur</option></select></Field><Field label="Quantité"><input type="number" min="0" required style={{...inputStyle,width:120}} value={mouvementStockForm.quantite} onChange={e=>setMouvementStockForm({...mouvementStockForm,quantite:e.target.value})}/></Field><Field label="Motif"><input style={{...inputStyle,minWidth:240}} value={mouvementStockForm.motif} onChange={e=>setMouvementStockForm({...mouvementStockForm,motif:e.target.value})}/></Field><Button type="submit"><Plus size={15}/> Enregistrer mouvement</Button></form><Table headers={["Image","Code","Produit","Catégorie","Qté","Seuil","Prix achat","Prix vente","Valeur","Statut","Actions"]}>{produits.map(p=>{const bas=Number(p.quantite)<=Number(p.seuil_alerte); const cat=categories.find(c=>c.id===p.categorie_id);return <tr key={p.id} style={{borderTop:`1px solid ${INK}0D`,background:bas?`${CORAL}08`:"transparent"}}><td style={cell}>{p.image_url?<img src={p.image_url} alt={p.nom} style={{width:38,height:38,objectFit:"cover",borderRadius:7}}/>:"—"}</td><td style={cell}>{p.code_produit || codeCourt("PRD",p.id)}</td><td style={cell}>{p.nom}</td><td style={cell}>{cat?.nom || "Non classé"}</td><td style={cell}>{p.quantite}</td><td style={cell}>{p.seuil_alerte}</td><td style={cell}>{fmt(p.prix_achat)}</td><td style={cell}>{fmt(p.prix_vente)}</td><td style={cell}>{fmt(Number(p.quantite)*Number(p.prix_achat))}</td><td style={cell}>{bas?<span style={{color:CORAL,fontWeight:800}}>Stock bas</span>:<span style={{color:TEAL,fontWeight:800}}>OK</span>}</td><td style={cell}><button onClick={()=>setProduitForm({...p,quantite:String(p.quantite),seuil_alerte:String(p.seuil_alerte),prix_achat:String(p.prix_achat),prix_vente:String(p.prix_vente),categorie_id:p.categorie_id||"",code_barres:p.code_barres||"",image_url:p.image_url||""})} style={linkBtn(TEAL)}>Modifier</button><button onClick={()=>deleteRow("produits",p.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>})}</Table><div style={{height:18}}/><SectionTitle title="Historique des mouvements" /><Table headers={["Date","Produit","Type","Qté","Avant","Après","Motif"]}>{mouvementsStock.slice(0,80).map(m=>{const p=produits.find(x=>x.id===m.produit_id);return <tr key={m.id} style={{borderTop:`1px solid ${INK}0D`}}><td style={cell}>{m.created_at ? new Date(m.created_at).toLocaleDateString("fr-FR") : "—"}</td><td style={cell}>{p?.nom||"—"}</td><td style={cell}>{m.type_mouvement}</td><td style={cell}>{m.quantite}</td><td style={cell}>{m.stock_avant}</td><td style={cell}>{m.stock_apres}</td><td style={cell}>{m.motif||"—"}</td></tr>})}</Table><div style={{height:18}}/><SectionTitle title="Historique inventaires" /><Table headers={["Date","Produit","Stock système","Stock physique","Écart"]}>{inventaires.slice(0,80).map(inv=>{const p=produits.find(x=>x.id===inv.produit_id);return <tr key={inv.id} style={{borderTop:`1px solid ${INK}0D`}}><td style={cell}>{inv.created_at ? new Date(inv.created_at).toLocaleDateString("fr-FR") : "—"}</td><td style={cell}>{p?.nom||"—"}</td><td style={cell}>{inv.stock_systeme}</td><td style={cell}>{inv.stock_physique}</td><td style={{...cell,color:Number(inv.ecart)===0?TEAL:CORAL,fontWeight:800}}>{inv.ecart}</td></tr>})}</Table></>}
 
         {tab === "ventes" && <><SectionTitle title="Ventes professionnelles" sub="Vente comptant, vente à crédit, paiement partiel et créance automatique." /><form onSubmit={saveVente} style={formStyle(CARD, INK)}><Field label="Client"><select required style={{...inputStyle,minWidth:220}} value={venteForm.client_id} onChange={e=>setVenteForm({...venteForm,client_id:e.target.value})}><option value="">Sélectionner un client</option>{clients.map(c=><option key={c.id} value={c.id}>{c.nom}</option>)}</select></Field><Field label="Type de vente"><select style={{...inputStyle,minWidth:150}} value={venteForm.type_vente || "comptant"} onChange={e=>setVenteForm({...venteForm,type_vente:e.target.value})}><option value="comptant">Comptant</option><option value="credit">À crédit</option></select></Field><Field label="Mode de paiement"><PaymentSelect style={inputStyle} value={venteForm.mode_paiement || "Espèces"} onChange={m=>setVenteForm({...venteForm,mode_paiement:m})} includeCredit={venteForm.type_vente==="credit"} /></Field>{venteForm.type_vente==="credit" && <><Field label="Montant payé"><input type="number" min="0" style={{...inputStyle,width:130}} value={venteForm.montant_paye} onChange={e=>setVenteForm({...venteForm,montant_paye:e.target.value})}/></Field><Field label="Échéance"><input type="date" style={inputStyle} value={venteForm.date_echeance} onChange={e=>setVenteForm({...venteForm,date_echeance:e.target.value})}/></Field></>}<div style={{ flexBasis:"100%" }}></div>{venteLignes.map((ligne, idx)=>{const p=produits.find(x=>x.id===ligne.produit_id); const total=Number(ligne.quantite||0)*Number(p?.prix_vente||0); const stockOk = !p || Number(ligne.quantite||0) <= Number(p.quantite); return <div key={idx} style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end", padding:10, border:`1px solid ${stockOk ? INK+"12" : CORAL+"66"}`, borderRadius:10, background: stockOk ? "#fff" : `${CORAL}08` }}><Field label={`Produit ${idx+1}`}><select style={{...inputStyle,minWidth:220}} value={ligne.produit_id} onChange={e=>setVenteLignes(venteLignes.map((l,i)=>i===idx?{...l,produit_id:e.target.value}:l))}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom} — Stock: {p.quantite} — {fmt(p.prix_vente)}</option>)}</select></Field><Field label="Quantité"><input type="number" min="1" style={{...inputStyle,width:90}} value={ligne.quantite} onChange={e=>setVenteLignes(venteLignes.map((l,i)=>i===idx?{...l,quantite:e.target.value}:l))}/></Field><Field label="Total"><div style={{...inputStyle, minWidth:130, background:`${TEAL}08`, fontWeight:800, color:TEAL}}>{fmt(total)}</div></Field>{!stockOk && <div style={{color:CORAL,fontSize:12,fontWeight:800}}>Stock insuffisant</div>}{venteLignes.length>1 && <Button type="button" danger onClick={()=>setVenteLignes(venteLignes.filter((_,i)=>i!==idx))}>Retirer</Button>}</div>})}<div style={{ flexBasis:"100%", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}><Button type="button" secondary onClick={()=>setVenteLignes([...venteLignes,{produit_id:produits[0]?.id||"",quantite:1}])}><Plus size={15}/> Ajouter un produit</Button><div style={{fontWeight:800,color:INK}}>Total vente : {fmt(venteLignes.reduce((s,l)=>{const p=produits.find(x=>x.id===l.produit_id);return s+Number(l.quantite||0)*Number(p?.prix_vente||0)},0))}</div></div><Button type="submit" disabled={!produits.length || !clients.length}><Plus size={15}/> Enregistrer la vente</Button></form><div style={{background:CARD,border:`1px solid ${INK}0F`,borderRadius:12,padding:14,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}><Field label="Recherche"><input style={{...inputStyle,minWidth:260}} placeholder="Client, produit, référence, montant..." value={ventesSearch} onChange={e=>{setVentesSearch(e.target.value);setVentesPage(1);}}/></Field><Field label="Du"><input type="date" style={inputStyle} value={ventesDateDebut} onChange={e=>{setVentesDateDebut(e.target.value);setVentesPage(1);}}/></Field><Field label="Au"><input type="date" style={inputStyle} value={ventesDateFin} onChange={e=>{setVentesDateFin(e.target.value);setVentesPage(1);}}/></Field><Field label="Mode paiement"><select style={inputStyle} value={ventesModeFilter} onChange={e=>{setVentesModeFilter(e.target.value);setVentesPage(1);}}><option value="tous">Tous</option>{modePaiementOptionsPro.map(m=><option key={m} value={m}>{m}</option>)}</select></Field><Field label="Statut"><select style={inputStyle} value={ventesStatutFilter} onChange={e=>{setVentesStatutFilter(e.target.value);setVentesPage(1);}}><option value="tous">Tous</option><option value="validée">Validée</option><option value="payée">Payée</option><option value="brouillon">Brouillon</option><option value="annulée">Annulée</option></select></Field><div style={{marginLeft:"auto",fontSize:12.5,color:`${INK}88`,fontWeight:800}}>{ventesFiltreesPro.length} vente(s) — 5 lignes par page</div></div>{renderVentesTable(ventesPageRows, produits, clients, cell, deleteRow, imprimerFacture)}<PaginationPro page={ventesPage} pages={pagesVentes} setPage={setVentesPage} /> </>}
-        {tab === "factures" && <><SectionTitle title="Factures professionnelles & Paiements" sub="Suivi des paiements, ventes à crédit et reste à payer." />{factureEditForm && <form onSubmit={modifierFacture} style={formStyle(CARD, INK)}><Field label="Client"><select style={{...inputStyle,minWidth:190}} value={factureEditForm.client_id || ""} onChange={e=>setFactureEditForm({...factureEditForm,client_id:e.target.value})}><option value="">Client non renseigné</option>{clients.map(c=><option key={c.id} value={c.id}>{codeClient(c)} — {c.nom}</option>)}</select></Field><Field label="Produit"><select style={{...inputStyle,minWidth:220}} value={factureEditForm.produit_id} onChange={e=>{const p=produits.find(x=>x.id===e.target.value);setFactureEditForm({...factureEditForm,produit_id:e.target.value,prix_unitaire:p?.prix_vente||factureEditForm.prix_unitaire})}}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom}</option>)}</select></Field><Field label="Quantité"><input type="number" min="1" style={{...inputStyle,width:90}} value={factureEditForm.quantite} onChange={e=>setFactureEditForm({...factureEditForm,quantite:e.target.value})}/></Field><Field label="Prix unitaire"><input type="number" min="0" style={{...inputStyle,width:130}} value={factureEditForm.prix_unitaire} onChange={e=>setFactureEditForm({...factureEditForm,prix_unitaire:e.target.value})}/></Field><Field label="Statut"><select style={inputStyle} value={factureEditForm.statut || "brouillon"} onChange={e=>setFactureEditForm({...factureEditForm,statut:e.target.value})}><option value="brouillon">Brouillon</option><option value="validée">Validée</option><option value="payée">Payée</option><option value="annulée">Annulée</option></select></Field><Field label="Paiement"><PaymentSelect style={inputStyle} value={factureEditForm.mode_paiement || "Espèces"} onChange={m=>setFactureEditForm({...factureEditForm,mode_paiement:m})} includeCredit /></Field><Button type="submit"><Save size={15}/> Enregistrer</Button><Button type="button" secondary onClick={()=>setFactureEditForm(null)}>Annuler</Button></form>}<div style={{background:CARD,border:`1px solid ${INK}0F`,borderRadius:12,padding:14,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}><Field label="Recherche"><input style={{...inputStyle,minWidth:260}} placeholder="Client, produit, référence, montant..." value={facturesSearch} onChange={e=>{setFacturesSearch(e.target.value);setFacturesPage(1);}}/></Field><Field label="Du"><input type="date" style={inputStyle} value={facturesDateDebut} onChange={e=>{setFacturesDateDebut(e.target.value);setFacturesPage(1);}}/></Field><Field label="Au"><input type="date" style={inputStyle} value={facturesDateFin} onChange={e=>{setFacturesDateFin(e.target.value);setFacturesPage(1);}}/></Field><Field label="Mode paiement"><select style={inputStyle} value={facturesModeFilter} onChange={e=>{setFacturesModeFilter(e.target.value);setFacturesPage(1);}}><option value="tous">Tous</option>{modePaiementOptionsPro.map(m=><option key={m} value={m}>{m}</option>)}</select></Field><Field label="Statut"><select style={inputStyle} value={facturesStatutFilter} onChange={e=>{setFacturesStatutFilter(e.target.value);setFacturesPage(1);}}><option value="tous">Tous</option><option value="validée">Validée</option><option value="payée">Payée</option><option value="brouillon">Brouillon</option><option value="annulée">Annulée</option></select></Field><div style={{marginLeft:"auto",fontSize:12.5,color:`${INK}88`,fontWeight:800}}>{facturesFiltreesPro.length} facture(s) — utilisez Suivant pour voir les autres pages</div></div><Table headers={["Date","Référence","Client","Produit","Qté","Total","Payé","Reste","Statut","Paiement","Actions"]}>{facturesPageRows.map(v=>{const p=produits.find(x=>x.id===v.produit_id), c=clients.find(x=>x.id===v.client_id); const total=Number(v.quantite)*Number(v.prix_unitaire); const statut=v.statut||"validée"; return <tr key={v.id} style={{borderTop:`1px solid ${INK}0D`, background: statut==="annulée"?`${CORAL}08`: "transparent"}}><td style={cell}>{v.date_vente}</td><td style={cell}>{factureReference(v)}</td><td style={cell}>{c?.nom || "Client non renseigné"}</td><td style={cell}>{p?.nom || "—"}</td><td style={cell}>{v.quantite}</td><td style={{...cell,color:TEAL,fontWeight:800}}>{fmt(total)}</td><td style={cell}>{fmt(v.montant_paye || 0)}</td><td style={{...cell,color:Number(v.reste_a_payer||0)>0?CORAL:TEAL,fontWeight:800}}>{fmt(v.reste_a_payer || 0)}</td><td style={cell}><span style={{fontWeight:800,color:statut==="payée"?TEAL:statut==="annulée"?CORAL:statut==="brouillon"?MUSTARD:INK}}>{statut}</span></td><td style={cell}><PaymentBadge mode={v.mode_paiement || "Espèces"} /></td><td style={cell}><button onClick={()=>imprimerFacture(v)} style={linkBtn(TEAL)}>Imprimer</button><button onClick={()=>setFactureEditForm({...v,quantite:String(v.quantite),prix_unitaire:String(v.prix_unitaire),statut:v.statut||"validée",mode_paiement:v.mode_paiement||"Espèces"})} style={linkBtn(INK)}>Modifier</button>{statut!=="payée"&&<button onClick={()=>changerStatutFacture(v,"payée")} style={linkBtn(TEAL)}>Payée</button>}{statut!=="annulée"&&<button onClick={()=>changerStatutFacture(v,"annulée")} style={linkBtn(CORAL)}>Annuler</button>}<button onClick={()=>dupliquerFacture(v)} style={linkBtn(MUSTARD)}>Dupliquer</button></td></tr>})}</Table><PaginationPro page={facturesPage} pages={pagesFactures} setPage={setFacturesPage} /></>}
+        {tab === "factures" && <><SectionTitle title="Factures professionnelles & Paiements" sub="Suivi des paiements, ventes à crédit et reste à payer." />{factureEditForm && <form onSubmit={modifierFacture} style={formStyle(CARD, INK)}><Field label="Client"><select style={{...inputStyle,minWidth:190}} value={factureEditForm.client_id || ""} onChange={e=>setFactureEditForm({...factureEditForm,client_id:e.target.value})}><option value="">Client non renseigné</option>{clients.map(c=><option key={c.id} value={c.id}>{codeClient(c)} — {c.nom}</option>)}</select></Field><Field label="Produit"><select style={{...inputStyle,minWidth:220}} value={factureEditForm.produit_id} onChange={e=>{const p=produits.find(x=>x.id===e.target.value);setFactureEditForm({...factureEditForm,produit_id:e.target.value,prix_unitaire:p?.prix_vente||factureEditForm.prix_unitaire})}}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom}</option>)}</select></Field><Field label="Quantité"><input type="number" min="1" style={{...inputStyle,width:90}} value={factureEditForm.quantite} onChange={e=>setFactureEditForm({...factureEditForm,quantite:e.target.value})}/></Field><Field label="Prix unitaire"><input type="number" min="0" style={{...inputStyle,width:130}} value={factureEditForm.prix_unitaire} onChange={e=>setFactureEditForm({...factureEditForm,prix_unitaire:e.target.value})}/></Field><Field label="Statut"><select style={inputStyle} value={factureEditForm.statut || "brouillon"} onChange={e=>setFactureEditForm({...factureEditForm,statut:e.target.value})}><option value="brouillon">Brouillon</option><option value="validée">Validée</option><option value="payée">Payée</option><option value="annulée">Annulée</option></select></Field><Field label="Paiement"><PaymentSelect style={inputStyle} value={factureEditForm.mode_paiement || "Espèces"} onChange={m=>setFactureEditForm({...factureEditForm,mode_paiement:m})} includeCredit /></Field><Button type="submit"><Save size={15}/> Enregistrer</Button><Button type="button" secondary onClick={()=>setFactureEditForm(null)}>Annuler</Button></form>}<div style={{background:CARD,border:`1px solid ${INK}0F`,borderRadius:12,padding:14,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}><Field label="Recherche"><input style={{...inputStyle,minWidth:260}} placeholder="Client, produit, référence, montant..." value={facturesSearch} onChange={e=>{setFacturesSearch(e.target.value);setFacturesPage(1);}}/></Field><Field label="Du"><input type="date" style={inputStyle} value={facturesDateDebut} onChange={e=>{setFacturesDateDebut(e.target.value);setFacturesPage(1);}}/></Field><Field label="Au"><input type="date" style={inputStyle} value={facturesDateFin} onChange={e=>{setFacturesDateFin(e.target.value);setFacturesPage(1);}}/></Field><Field label="Mode paiement"><select style={inputStyle} value={facturesModeFilter} onChange={e=>{setFacturesModeFilter(e.target.value);setFacturesPage(1);}}><option value="tous">Tous</option>{modePaiementOptionsPro.map(m=><option key={m} value={m}>{m}</option>)}</select></Field><Field label="Statut"><select style={inputStyle} value={facturesStatutFilter} onChange={e=>{setFacturesStatutFilter(e.target.value);setFacturesPage(1);}}><option value="tous">Tous</option><option value="validée">Validée</option><option value="payée">Payée</option><option value="brouillon">Brouillon</option><option value="annulée">Annulée</option></select></Field><div style={{marginLeft:"auto",fontSize:12.5,color:`${INK}88`,fontWeight:800}}>{facturesFiltreesPro.length} facture(s) — utilisez Suivant pour voir les autres pages</div></div><Table headers={["Date","Référence","Client","Produits regroupés","Qté totale","Total","Payé","Reste","Statut","Paiement","Actions"]}>{facturesPageRows.map(v=>{const c=clients.find(x=>x.id===v.client_id); const total=Number(v._total || 0); const statut=v.statut||"validée"; const premiereLigne = v.lignes?.[0] || v; return <tr key={v.id} style={{borderTop:`1px solid ${INK}0D`, background: statut==="annulée"?`${CORAL}08`: "transparent"}}><td style={cell}>{v.date_vente}</td><td style={cell}>{v.reference || factureGroupKey(v)}</td><td style={cell}>{c?.nom || "Client non renseigné"}</td><td style={{...cell, maxWidth:280}}>{v._produitsText || "—"}</td><td style={cell}>{v._quantiteTotal || 0}</td><td style={{...cell,color:TEAL,fontWeight:800}}>{fmt(total)}</td><td style={cell}>{fmt(v.montant_paye || 0)}</td><td style={{...cell,color:Number(v.reste_a_payer||0)>0?CORAL:TEAL,fontWeight:800}}>{fmt(v.reste_a_payer || 0)}</td><td style={cell}><span style={{fontWeight:800,color:statut==="payée"?TEAL:statut==="annulée"?CORAL:statut==="brouillon"?MUSTARD:INK}}>{statut}</span></td><td style={cell}><PaymentBadge mode={v.mode_paiement || "Espèces"} /></td><td style={cell}><button onClick={()=>imprimerFacture(v)} style={linkBtn(TEAL)}>Imprimer</button><button onClick={()=>setFactureEditForm({...premiereLigne,quantite:String(premiereLigne.quantite),prix_unitaire:String(premiereLigne.prix_unitaire),statut:premiereLigne.statut||"validée",mode_paiement:premiereLigne.mode_paiement||"Espèces"})} style={linkBtn(INK)}>Modifier ligne</button>{statut!=="payée"&&<button onClick={()=>changerStatutFacture(v,"payée")} style={linkBtn(TEAL)}>Payée</button>}{statut!=="annulée"&&<button onClick={()=>changerStatutFacture(v,"annulée")} style={linkBtn(CORAL)}>Annuler</button>}<button onClick={()=>dupliquerFacture(v)} style={linkBtn(MUSTARD)}>Dupliquer</button></td></tr>})}</Table><PaginationPro page={facturesPage} pages={pagesFactures} setPage={setFacturesPage} /></>}
         {tab === "devis" && <><SectionTitle title="Devis" sub="Créez un devis client avec plusieurs produits." /><form onSubmit={saveDevis} style={formStyle(CARD, INK)}><Field label="Client"><select required style={{...inputStyle,minWidth:220}} value={devisForm.client_id} onChange={e=>setDevisForm({...devisForm,client_id:e.target.value})}><option value="">Sélectionner un client</option>{clients.map(c=><option key={c.id} value={c.id}>{codeClient(c)} — {c.nom}</option>)}</select></Field><div style={{ flexBasis:"100%" }}></div>{devisLignes.map((ligne, idx)=>{const p=produits.find(x=>x.id===ligne.produit_id); const total=Number(ligne.quantite||0)*Number(p?.prix_vente||0); return <div key={idx} style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end", padding:10, border:`1px solid ${INK}12`, borderRadius:10, background:"#fff" }}><Field label={`Produit ${idx+1}`}><select style={{...inputStyle,minWidth:220}} value={ligne.produit_id} onChange={e=>setDevisLignes(devisLignes.map((l,i)=>i===idx?{...l,produit_id:e.target.value}:l))}>{produits.map(p=><option key={p.id} value={p.id}>{p.nom} — {fmt(p.prix_vente)}</option>)}</select></Field><Field label="Quantité"><input type="number" min="1" style={{...inputStyle,width:90}} value={ligne.quantite} onChange={e=>setDevisLignes(devisLignes.map((l,i)=>i===idx?{...l,quantite:e.target.value}:l))}/></Field><Field label="Total"><div style={{...inputStyle, minWidth:130, background:`${TEAL}08`, fontWeight:800, color:TEAL}}>{fmt(total)}</div></Field>{devisLignes.length>1 && <Button type="button" danger onClick={()=>setDevisLignes(devisLignes.filter((_,i)=>i!==idx))}>Retirer</Button>}</div>})}<div style={{ flexBasis:"100%", display:"flex", gap:10, alignItems:"center" }}><Button type="button" secondary onClick={()=>setDevisLignes([...devisLignes,{produit_id:produits[0]?.id||"",quantite:1}])}><Plus size={15}/> Ajouter un produit</Button><div style={{fontWeight:800,color:INK}}>Total devis : {fmt(devisLignes.reduce((s,l)=>{const p=produits.find(x=>x.id===l.produit_id);return s+Number(l.quantite||0)*Number(p?.prix_vente||0)},0))}</div></div><Button type="submit" disabled={!produits.length || !clients.length}><Plus size={15}/> Créer le devis</Button></form><Table headers={["Date","Référence","Client","Statut","Total","Actions"]}>{devis.map(d=>{const c=clients.find(x=>x.id===d.client_id);return <tr key={d.id} style={{borderTop:`1px solid ${INK}0D`}}><td style={cell}>{d.date_devis}</td><td style={cell}>{d.reference}</td><td style={cell}>{c?.nom||"—"}</td><td style={cell}>{d.statut}</td><td style={{...cell,color:TEAL,fontWeight:800}}>{fmt(d.montant_total)}</td><td style={cell}><button onClick={()=>imprimerDocumentSimple("DEVIS", d.reference, c?.nom, d.montant_total, d.date_devis)} style={linkBtn(TEAL)}>Imprimer</button>{d.statut !== "converti" && <button onClick={()=>convertirDevisEnFacture(d)} style={linkBtn(INK)}>Convertir</button>}<button onClick={()=>deleteRow("devis",d.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>})}</Table></>}
 
         {tab === "depenses" && <><SectionTitle title="Dépenses" /><form onSubmit={saveDepense} style={formStyle(CARD, INK)}><Field label="Catégorie"><select style={{...inputStyle,minWidth:170}} value={depenseForm.categorie} onChange={e=>setDepenseForm({...depenseForm,categorie:e.target.value})}>{CATEGORIES_DEPENSES.map(c=><option key={c} value={c}>{c}</option>)}</select></Field><Field label="Montant"><input type="number" min="1" style={{...inputStyle,width:120}} value={depenseForm.montant} onChange={e=>setDepenseForm({...depenseForm,montant:e.target.value})}/></Field><Field label="Description"><input style={{...inputStyle,minWidth:220}} value={depenseForm.description} onChange={e=>setDepenseForm({...depenseForm,description:e.target.value})}/></Field><Button type="submit"><Plus size={15}/> Enregistrer</Button></form><div style={{background:CARD,border:`1px solid ${INK}0F`,borderRadius:12,padding:14,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}><Field label="Recherche"><input style={{...inputStyle,minWidth:260}} placeholder="Catégorie, référence, description, montant..." value={depensesSearch} onChange={e=>{setDepensesSearch(e.target.value);setDepensesPage(1);}}/></Field><Field label="Du"><input type="date" style={inputStyle} value={depensesDateDebut} onChange={e=>{setDepensesDateDebut(e.target.value);setDepensesPage(1);}}/></Field><Field label="Au"><input type="date" style={inputStyle} value={depensesDateFin} onChange={e=>{setDepensesDateFin(e.target.value);setDepensesPage(1);}}/></Field><Field label="Mode paiement"><select style={inputStyle} value={depensesModeFilter} onChange={e=>{setDepensesModeFilter(e.target.value);setDepensesPage(1);}}><option value="tous">Tous</option>{modePaiementOptionsPro.map(m=><option key={m} value={m}>{m}</option>)}</select></Field><Field label="Catégorie"><select style={inputStyle} value={depensesCategorieFilter} onChange={e=>{setDepensesCategorieFilter(e.target.value);setDepensesPage(1);}}><option value="toutes">Toutes</option>{CATEGORIES_DEPENSES.map(c=><option key={c} value={c}>{c}</option>)}</select></Field><div style={{marginLeft:"auto",fontSize:12.5,color:`${INK}88`,fontWeight:800}}>{depensesFiltreesPro.length} dépense(s) — 5 lignes par page</div></div><Table headers={["Date","Catégorie","Mode","Description","Montant",""]}>{depensesPageRows.map(d=><tr key={d.id} style={{borderTop:`1px solid ${INK}0D`}}><td style={cell}>{d.date_depense}</td><td style={cell}>{d.categorie}</td><td style={cell}><PaymentBadge mode={d.mode_paiement || "Espèces"} /></td><td style={cell}>{d.description||"—"}</td><td style={cell}>{fmt(d.montant)}</td><td style={cell}><button onClick={()=>deleteRow("depenses",d.id)} style={linkBtn(CORAL)}>Supprimer</button></td></tr>)}</Table><PaginationPro page={depensesPage} pages={pagesDepenses} setPage={setDepensesPage} /></>}
