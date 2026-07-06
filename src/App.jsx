@@ -128,6 +128,33 @@ const normalizePaymentMode = (mode) => {
 const getPaymentMode = (mode) => PAYMENT_MODES.find((m) => m.value === normalizePaymentMode(mode)) || PAYMENT_MODES.find((m) => m.value === "Autre");
 const paymentOptions = (includeCredit = false) => PAYMENT_MODES.filter((m) => includeCredit || m.value !== "Crédit");
 
+const PREFIXES_TELEPHONE_SN = ["70", "71", "75", "76", "77", "78", "33"];
+
+const cleanPhoneDigits = (value) => {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("221")) digits = digits.slice(3);
+  return digits.slice(0, 9);
+};
+
+const formatPhoneDisplaySN = (value) => {
+  const d = cleanPhoneDigits(value);
+  if (!d) return "";
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return `${d.slice(0, 2)} ${d.slice(2)}`;
+  if (d.length <= 7) return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5)}`;
+  return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7, 9)}`;
+};
+
+const normalizeTelephoneSN = (value) => {
+  const digits = cleanPhoneDigits(value);
+  if (!digits) return { ok: true, value: null, digits: "" };
+  const prefix = digits.slice(0, 2);
+  const ok = digits.length === 9 && PREFIXES_TELEPHONE_SN.includes(prefix);
+  return { ok, digits, value: ok ? `+221 ${formatPhoneDisplaySN(digits)}` : null };
+};
+
+const messageTelephoneSN = "Numéro sénégalais invalide. Utilisez 9 chiffres avec un préfixe valide : 70, 71, 75, 76, 77, 78 ou 33. Exemple : 77 123 45 67.";
+
 const ABONNEMENT_MENSUEL = 25000;
 const JOURS_ESSAI_ABONNEMENT = 20;
 const JOURS_ALERTE_ABONNEMENT = 5;
@@ -146,26 +173,6 @@ const formatDateFr = (dateStr) => {
   const d = new Date(`${dateStr}T00:00:00`);
   return d.toLocaleDateString("fr-FR");
 };
-
-const normalizeTelephoneSN = (value) => {
-  const digits = String(value || "").replace(/\D/g, "");
-  return digits.startsWith("221") ? digits.slice(3) : digits;
-};
-
-const isTelephoneSNValide = (value) => {
-  const tel = normalizeTelephoneSN(value);
-  return /^(70|71|75|76|77|78|33)\d{7}$/.test(tel);
-};
-
-const formatTelephoneSN = (value) => {
-  const tel = normalizeTelephoneSN(value).slice(0, 9);
-  if (tel.length <= 2) return tel;
-  if (tel.length <= 5) return `${tel.slice(0, 2)} ${tel.slice(2)}`;
-  if (tel.length <= 7) return `${tel.slice(0, 2)} ${tel.slice(2, 5)} ${tel.slice(5)}`;
-  return `${tel.slice(0, 2)} ${tel.slice(2, 5)} ${tel.slice(5, 7)} ${tel.slice(7, 9)}`;
-};
-
-const telephoneSNMessage = "Numéro invalide. Saisissez un numéro sénégalais valide : 70, 71, 75, 76, 77, 78 ou fixe 33 (9 chiffres).";
 
 const factureReference = (vente) => {
   if (!vente) return "";
@@ -361,17 +368,25 @@ function PaymentSelect({ value, onChange, style, includeCredit = false }) {
   </div>;
 }
 
-function PhoneSNInput({ value, onChange, style, placeholder = "77 000 00 00" }) {
+function PhoneSNInput({ value, onChange, style, placeholder = "77 123 45 67" }) {
+  const digits = cleanPhoneDigits(value);
+  const prefix = digits.slice(0, 2);
+  const isInvalid = digits.length > 0 && (digits.length !== 9 || !PREFIXES_TELEPHONE_SN.includes(prefix));
   return (
-    <div style={{ display: "flex", alignItems: "center", border: `1px solid ${INK}22`, borderRadius: 7, overflow: "hidden", background: "#fff", minWidth: 170 }}>
-      <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
-      <input
-        type="tel"
-        placeholder={placeholder}
-        value={String(value || "").replace(/^\+221\s?/, "")}
-        onChange={(e) => onChange(e.target.value.replace(/[^0-9 ]/g, ""))}
-        style={{ ...style, border: "none", minWidth: 120 }}
-      />
+    <div style={{ minWidth: 190 }}>
+      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${isInvalid ? CORAL : INK}22`, borderRadius: 7, overflow: "hidden", background: "#fff" }}>
+        <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
+        <input
+          type="tel"
+          inputMode="numeric"
+          placeholder={placeholder}
+          value={formatPhoneDisplaySN(value)}
+          maxLength={12}
+          onChange={(e) => onChange(cleanPhoneDigits(e.target.value))}
+          style={{ ...style, border: "none", minWidth: 125 }}
+        />
+      </div>
+      {isInvalid && <div style={{ color: CORAL, fontSize: 11, fontWeight: 800, marginTop: 4 }}>Préfixes autorisés : 70, 71, 75, 76, 77, 78, 33.</div>}
     </div>
   );
 }
@@ -1856,8 +1871,9 @@ export default function App() {
 
   async function savePerson(table, form, setter, empty) {
     if (!entreprise?.id || !form.nom.trim()) return;
-    if (form.telephone && !isTelephoneSNValide(form.telephone)) return setMessage(telephoneSNMessage);
-    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: form.telephone ? `+221 ${normalizeTelephoneSN(form.telephone)}` : null, email: form.email || null, adresse: form.adresse || null };
+    const tel = normalizeTelephoneSN(form.telephone);
+    if (!tel.ok) return setMessage(messageTelephoneSN);
+    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: tel.value, email: form.email || null, adresse: form.adresse || null };
     if (!form.id && table === "clients") payload.code_client = `CLI-${String(Date.now()).slice(-6)}`;
     if (!form.id && table === "fournisseurs") payload.code_fournisseur = `FOU-${String(Date.now()).slice(-6)}`;
     const res = form.id ? await supabase.from(table).update(payload).eq("id", form.id) : await supabase.from(table).insert(payload);
@@ -1985,7 +2001,7 @@ export default function App() {
         quantite: l.quantite,
         prix_unitaire: l.prix_unitaire,
         utilisateur_id: profil.id,
-        reference: baseRef,
+        reference: String(baseRef).replace(/-\d+$/, ""),
         statut: resteLigne <= 0 ? "payée" : "validée",
         mode_paiement: venteForm.mode_paiement || "Espèces",
         type_vente: typeVente,
@@ -2390,8 +2406,7 @@ export default function App() {
 
   async function saveEntreprise(e) {
     e.preventDefault();
-    if (entrepriseForm.telephone && !isTelephoneSNValide(entrepriseForm.telephone)) return setMessage(telephoneSNMessage);
-    const payloadEntreprise = { ...entrepriseForm, telephone: entrepriseForm.telephone ? `+221 ${normalizeTelephoneSN(entrepriseForm.telephone)}` : null };
+    const payloadEntreprise = { ...entrepriseForm, telephone: entrepriseForm.telephone ? `+221 ${String(entrepriseForm.telephone).replace(/^\+221\s?/, "")}` : null };
     const { error } = await supabase.from("entreprises").update(payloadEntreprise).eq("id", entreprise.id);
     if (error) showError(error, "Impossible de modifier les paramètres."); else { setMessage("Paramètres enregistrés."); chargerProfilEtEntreprise(); }
   }
@@ -2399,34 +2414,20 @@ export default function App() {
     const isGroupe = Array.isArray(v?.lignes);
     const lignes = isGroupe
       ? v.lignes
-      : ventes.filter((x) => factureReferenceGroupe(x) === factureReferenceGroupe(v) && x.client_id === v.client_id)
-          .map((x) => ({ ...x, produit: produits.find((p) => p.id === x.produit_id), total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0) }));
-
+      : ventes.filter((x) => factureReferenceGroupe(x) === factureReferenceGroupe(v) && x.client_id === v.client_id).map((x) => ({ ...x, produit: produits.find((p) => p.id === x.produit_id), total: Number(x.quantite || 0) * Number(x.prix_unitaire || 0) }));
     const lignesFinales = lignes.length ? lignes : [{ ...v, produit: produits.find((x) => x.id === v.produit_id), total: Number(v.quantite || 0) * Number(v.prix_unitaire || 0) }];
     const c = v.client || clients.find((x) => x.id === v.client_id);
-    const total = lignesFinales.reduce((s, l) => s + Number(l.quantite || 0) * Number(l.prix_unitaire || 0), 0);
+    const total = isGroupe ? Number(v.total || 0) : lignesFinales.reduce((s, l) => s + Number(l.total || 0), 0);
     const montantPaye = isGroupe ? Number(v.montant_paye || 0) : lignesFinales.reduce((s, l) => s + Number(l.montant_paye || 0), 0);
     const reste = isGroupe ? Number(v.reste_a_payer || 0) : Math.max(total - montantPaye, 0);
-    const ref = factureReferenceGroupe(v);
-    const dateFacture = v.date_vente || String(v.created_at || today()).slice(0, 10);
-    const modePaiement = v.mode_paiement || lignesFinales[0]?.mode_paiement || "Espèces";
-    const statut = v.statut || lignesFinales[0]?.statut || "validée";
-
-    const rows = lignesFinales.map((l, i) => {
-      const prod = l.produit || produits.find(p => p.id === l.produit_id);
-      const totalLigne = Number(l.quantite || 0) * Number(l.prix_unitaire || 0);
-      return `
-        <tr>
-          <td class="num">${i + 1}</td>
-          <td>
-            <strong>${safeText(prod?.nom || "Produit")}</strong>
-            ${prod?.code_produit ? `<br/><span class="muted">Code : ${safeText(prod.code_produit)}</span>` : ""}
-          </td>
-          <td class="right">${safeText(l.quantite)}</td>
-          <td class="right">${safeText(fmt(l.prix_unitaire))}</td>
-          <td class="right total-cell">${safeText(fmt(totalLigne))}</td>
-        </tr>`;
-    }).join("");
+    const ref = v.reference || factureReferenceGroupe(v);
+    const rows = lignesFinales.map((l) => `
+      <tr>
+        <td>${safeText(l.produit?.nom || produits.find(p => p.id === l.produit_id)?.nom || "Produit")}</td>
+        <td class="right">${safeText(l.quantite)}</td>
+        <td class="right">${safeText(fmt(l.prix_unitaire))}</td>
+        <td class="right"><strong>${safeText(fmt(Number(l.quantite || 0) * Number(l.prix_unitaire || 0)))}</strong></td>
+      </tr>`).join("");
 
     const html = `
       <html>
@@ -2434,109 +2435,84 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { margin:0; background:#eef3f6; color:#183247; font-family: Inter, Arial, sans-serif; }
-            .page { width: 880px; margin: 24px auto; background:#fff; border-radius: 22px; overflow:hidden; box-shadow:0 28px 80px rgba(24,50,71,.14); }
-            .top { background: linear-gradient(135deg, #0f766e 0%, #152238 100%); color:#fff; padding: 30px 38px; display:flex; justify-content:space-between; gap:24px; }
-            .brand { display:flex; gap:14px; align-items:flex-start; }
-            .logo { width:62px; height:62px; border-radius:18px; background:#fff; display:flex; align-items:center; justify-content:center; color:#0f766e; font-size:25px; font-weight:900; }
-            .brand h1 { margin:0; font-size:25px; letter-spacing:-.5px; }
-            .brand p { margin:7px 0 0; line-height:1.55; color:rgba(255,255,255,.78); font-size:12.5px; }
-            .invoice-title { text-align:right; }
-            .invoice-title h2 { margin:0; font-size:34px; letter-spacing:1px; }
-            .invoice-title .ref { margin-top:9px; display:inline-block; padding:7px 12px; border-radius:999px; background:rgba(255,255,255,.16); font-weight:800; }
-            .content { padding: 34px 38px 38px; }
-            .meta { display:grid; grid-template-columns: 1.1fr .9fr; gap:18px; margin-bottom:26px; }
-            .box { border:1px solid #e5edf0; border-radius:18px; padding:18px; background:#fbfdfe; }
-            .box-title { text-transform:uppercase; color:#0f766e; font-size:11px; font-weight:900; letter-spacing:.8px; margin-bottom:10px; }
-            .line { font-size:13.5px; margin:5px 0; line-height:1.45; }
-            .muted { color:#6b7b88; font-size:12px; }
-            table { width:100%; border-collapse:separate; border-spacing:0; overflow:hidden; border-radius:16px; border:1px solid #e5edf0; }
-            thead th { background:#152238; color:#fff; text-align:left; padding:13px 14px; font-size:11.5px; text-transform:uppercase; letter-spacing:.6px; }
-            tbody td { padding:14px; border-bottom:1px solid #edf2f5; font-size:13.5px; vertical-align:top; }
-            tbody tr:nth-child(even) td { background:#f8fbfc; }
-            tbody tr:last-child td { border-bottom:none; }
-            .num { width:44px; color:#6b7b88; font-weight:800; }
-            .right { text-align:right; white-space:nowrap; }
-            .total-cell { color:#0f766e; font-weight:900; }
-            .summary-wrap { display:flex; justify-content:flex-end; margin-top:24px; }
-            .summary { width:380px; border-radius:18px; border:1px solid #d9ebe8; overflow:hidden; background:#f8fffd; }
-            .summary-row { display:flex; justify-content:space-between; padding:12px 16px; border-bottom:1px solid #e4f1ee; font-size:13.5px; }
-            .summary-row strong { color:#152238; }
-            .grand { background:#0f766e; color:#fff; font-size:20px; font-weight:900; padding:16px; display:flex; justify-content:space-between; }
-            .pay { margin-top:20px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
-            .pill { border-radius:14px; padding:12px; background:#f8fafc; border:1px solid #e5edf0; font-size:12.5px; }
-            .pill b { display:block; color:#152238; margin-bottom:4px; }
-            .footer { margin-top:34px; display:flex; justify-content:space-between; gap:20px; align-items:flex-end; }
-            .note { color:#6b7b88; font-size:12.5px; line-height:1.6; max-width:440px; }
-            .signature { width:220px; text-align:center; padding-top:45px; border-bottom:1px solid #152238; font-size:12px; color:#6b7b88; }
-            @media print { body { background:#fff; } .page { width:auto; margin:0; border-radius:0; box-shadow:none; } }
+            body { font-family: Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
+            .page { width: 800px; margin: 24px auto; background: white; padding: 38px; border-radius: 12px; }
+            .header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 4px solid #1E7F6E; padding-bottom: 18px; }
+            .brand h1 { margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: .5px; }
+            .brand div { margin-top: 6px; font-size: 13px; color: #5b6472; line-height: 1.45; }
+            .badge { text-align: right; }
+            .badge h2 { margin: 0; color: #1E7F6E; font-size: 26px; }
+            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
+            .box { border: 1px solid #e2e6ea; border-radius: 10px; padding: 14px; min-height: 110px; }
+            .box-title { font-size: 12px; text-transform: uppercase; color: #1E7F6E; font-weight: bold; margin-bottom: 10px; letter-spacing: .4px; }
+            .line { font-size: 14px; margin: 5px 0; line-height: 1.35; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 12px; text-transform: uppercase; }
+            td { padding: 13px 12px; border-bottom: 1px solid #e8eaee; font-size: 14px; }
+            .right { text-align: right; }
+            .total-box { margin-left: auto; margin-top: 22px; width: 360px; border: 2px solid #1E7F6E; border-radius: 10px; padding: 14px 16px; }
+            .total-line { display:flex; justify-content:space-between; margin: 8px 0; font-size: 14px; }
+            .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 22px; font-weight: bold; color: #1E7F6E; border-top: 1px solid #dce5e2; padding-top: 10px; margin-top: 10px; }
+            .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; }
+            .signature { margin-top: 36px; display: flex; justify-content: flex-end; }
+            .signature div { width: 220px; border-top: 1px solid #152238; padding-top: 8px; text-align: center; font-size: 13px; }
+            @media print { body { background: white; } .page { width: auto; margin: 0; border-radius: 0; box-shadow: none; } }
           </style>
         </head>
         <body>
           <div class="page">
-            <div class="top">
+            <div class="header">
               <div class="brand">
-                <div class="logo">SP</div>
+                <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
                 <div>
-                  <h1>${safeText(entreprise?.nom || "Suivi PME")}</h1>
-                  <p>
-                    ${safeText(entreprise?.adresse || "")}${entreprise?.adresse ? "<br/>" : ""}
-                    ${entreprise?.telephone ? "Tél : " + safeText(entreprise.telephone) + "<br/>" : ""}
-                    ${entreprise?.email ? "Email : " + safeText(entreprise.email) + "<br/>" : ""}
-                    ${entreprise?.ninea ? "NINEA : " + safeText(entreprise.ninea) + " " : ""}${entreprise?.rccm ? "RCCM : " + safeText(entreprise.rccm) : ""}
-                  </p>
+                  ${safeText(entreprise?.adresse || "")}<br/>
+                  ${entreprise?.telephone ? "Tél : " + safeText(entreprise.telephone) + "<br/>" : ""}
+                  ${entreprise?.email ? "Email : " + safeText(entreprise.email) + "<br/>" : ""}
+                  ${entreprise?.ninea ? "NINEA : " + safeText(entreprise.ninea) + "<br/>" : ""}
+                  ${entreprise?.rccm ? "RCCM : " + safeText(entreprise.rccm) : ""}
                 </div>
               </div>
-              <div class="invoice-title">
+              <div class="badge">
                 <h2>FACTURE</h2>
-                <div class="ref">${safeText(ref)}</div>
+                <div>N° ${safeText(ref)}</div>
+                <div>Date : ${safeText(formatDateFr(v.date_vente))}</div>
               </div>
             </div>
-            <div class="content">
-              <div class="meta">
-                <div class="box">
-                  <div class="box-title">Facturé à</div>
-                  <div class="line"><strong>${safeText(c?.nom || "Client non renseigné")}</strong></div>
-                  ${c?.telephone ? `<div class="line">Téléphone : ${safeText(c.telephone)}</div>` : ""}
-                  ${c?.email ? `<div class="line">Email : ${safeText(c.email)}</div>` : ""}
-                  ${c?.adresse ? `<div class="line">Adresse : ${safeText(c.adresse)}</div>` : ""}
-                </div>
-                <div class="box">
-                  <div class="box-title">Informations facture</div>
-                  <div class="line"><strong>Date :</strong> ${safeText(formatDateFr(dateFacture))}</div>
-                  <div class="line"><strong>Référence :</strong> ${safeText(ref)}</div>
-                  <div class="line"><strong>Nombre de produits :</strong> ${lignesFinales.length}</div>
-                  <div class="line"><strong>Devise :</strong> FCFA</div>
-                </div>
+
+            <div class="grid">
+              <div class="box">
+                <div class="box-title">Facturé à</div>
+                <div class="line"><strong>${safeText(c?.nom || "Client non renseigné")}</strong></div>
+                ${c?.telephone ? `<div class="line">Tél : ${safeText(c.telephone)}</div>` : ""}
+                ${c?.email ? `<div class="line">Email : ${safeText(c.email)}</div>` : ""}
+                ${c?.adresse ? `<div class="line">Adresse : ${safeText(c.adresse)}</div>` : ""}
               </div>
-
-              <table>
-                <thead>
-                  <tr><th>#</th><th>Désignation</th><th class="right">Qté</th><th class="right">Prix unitaire</th><th class="right">Montant</th></tr>
-                </thead>
-                <tbody>${rows}</tbody>
-              </table>
-
-              <div class="summary-wrap">
-                <div class="summary">
-                  <div class="summary-row"><span>Sous-total</span><strong>${safeText(fmt(total))}</strong></div>
-                  <div class="summary-row"><span>Montant payé</span><strong>${safeText(fmt(montantPaye))}</strong></div>
-                  <div class="summary-row"><span>Reste à payer</span><strong>${safeText(fmt(reste))}</strong></div>
-                  <div class="grand"><span>Total</span><span>${safeText(fmt(total))}</span></div>
-                </div>
-              </div>
-
-              <div class="pay">
-                <div class="pill"><b>Mode de paiement</b>${safeText(modePaiement)}</div>
-                <div class="pill"><b>Statut</b>${safeText(statut)}</div>
-                <div class="pill"><b>Émis par</b>${safeText(profil?.nom_complet || profil?.email || "Utilisateur")}</div>
-              </div>
-
-              <div class="footer">
-                <div class="note">Merci pour votre confiance.<br/>Cette facture regroupe tous les produits de la même vente sous une seule référence.</div>
-                <div><div class="signature"></div><div style="text-align:center;font-size:12px;margin-top:8px;color:#6b7b88">Signature / Cachet</div></div>
+              <div class="box">
+                <div class="box-title">Détails</div>
+                <div class="line"><strong>Référence :</strong> ${safeText(ref)}</div>
+                <div class="line"><strong>Mode :</strong> ${safeText(v.mode_paiement || "Espèces")}</div>
+                <div class="line"><strong>Statut :</strong> ${safeText(v.statut || "validée")}</div>
+                <div class="line"><strong>Produits :</strong> ${lignesFinales.length}</div>
+                <div class="line"><strong>Devise :</strong> FCFA</div>
               </div>
             </div>
+
+            <table>
+              <thead>
+                <tr><th>Produit</th><th class="right">Qté</th><th class="right">Prix unitaire</th><th class="right">Total</th></tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+
+            <div class="total-box">
+              <div class="total-line"><span>Montant payé</span><strong>${safeText(fmt(montantPaye))}</strong></div>
+              <div class="total-line"><span>Reste à payer</span><strong>${safeText(fmt(reste))}</strong></div>
+              <div class="total-row"><span>Total</span><span>${safeText(fmt(total))}</span></div>
+            </div>
+
+            <div class="signature"><div>Signature / Cachet</div></div>
+            <div class="footer">Merci pour votre confiance.<br/>Facture générée par Suivi PME.</div>
           </div>
           <script>window.print()</script>
         </body>
