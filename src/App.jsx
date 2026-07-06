@@ -11,7 +11,6 @@ import { supabase } from "./supabaseClient";
 import AuthScreen from "./AuthScreen";
 import logoSuiviPME from "./assets/logo-suivi-pme.png";
 
-const PATCH_FACTURE_UNIQUE_SN_2026_07_06 = true;
 const INK = "#152238";
 const TEAL = "#1E7F6E";
 const MUSTARD = "#E0913C";
@@ -129,6 +128,34 @@ const normalizePaymentMode = (mode) => {
 const getPaymentMode = (mode) => PAYMENT_MODES.find((m) => m.value === normalizePaymentMode(mode)) || PAYMENT_MODES.find((m) => m.value === "Autre");
 const paymentOptions = (includeCredit = false) => PAYMENT_MODES.filter((m) => includeCredit || m.value !== "Crédit");
 
+const PREFIXES_TELEPHONE_SN = ["70", "71", "75", "76", "77", "78", "33"];
+const cleanPhoneSN = (value) => {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("221")) digits = digits.slice(3);
+  return digits.slice(0, 9);
+};
+const isPhoneSNValid = (value) => /^(70|71|75|76|77|78|33)\d{7}$/.test(cleanPhoneSN(value));
+const formatPhoneSN = (value) => {
+  const d = cleanPhoneSN(value);
+  if (!d) return "";
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return `${d.slice(0, 2)} ${d.slice(2)}`;
+  if (d.length <= 7) return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5)}`;
+  return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7, 9)}`;
+};
+const normalizePhoneSN = (value) => {
+  const d = cleanPhoneSN(value);
+  return d ? `+221 ${formatPhoneSN(d)}` : null;
+};
+const assertPhoneSN = (value, label = "Numéro de téléphone") => {
+  const d = cleanPhoneSN(value);
+  if (!d) return { ok: true, value: null };
+  if (!isPhoneSNValid(d)) {
+    return { ok: false, message: `${label} invalide. Utilisez un numéro sénégalais valide : 70, 71, 75, 76, 77, 78 ou 33 suivi de 7 chiffres. Exemple : 77 123 45 67.` };
+  }
+  return { ok: true, value: normalizePhoneSN(d) };
+};
+
 const ABONNEMENT_MENSUEL = 25000;
 const JOURS_ESSAI_ABONNEMENT = 20;
 const JOURS_ALERTE_ABONNEMENT = 5;
@@ -156,17 +183,10 @@ const factureReference = (vente) => {
   return `FAC-${annee}-${court}`;
 };
 
-const normaliserReferenceFacture = (ref) => {
-  const value = String(ref || "").trim();
-  // On corrige uniquement les anciennes références créées par produit :
-  // FAC-2026-893127-1 -> FAC-2026-893127
-  // On NE touche PAS à une vraie référence comme FAC-2026-263833.
-  return value.replace(/^(FAC-\d{4}-\d{6})-\d+$/i, "$1");
-};
-
 const factureReferenceGroupe = (vente) => {
   const ref = factureReference(vente);
-  return normaliserReferenceFacture(ref);
+  // Corrige les anciennes références créées par ligne : FAC-2026-123456-1 -> FAC-2026-123456
+  return String(ref || "").replace(/-\d+$/, "");
 };
 
 const buildFactureGroups = (ventes, produits, clients) => {
@@ -349,40 +369,17 @@ function PaymentSelect({ value, onChange, style, includeCredit = false }) {
   </div>;
 }
 
-
-const cleanPhoneSN = (value) => String(value || "").replace(/[^0-9]/g, "").replace(/^221/, "").slice(0, 9);
-const isPhoneSNValid = (value) => /^(70|71|75|76|77|78|33)\d{7}$/.test(cleanPhoneSN(value));
-const formatPhoneSN = (value) => {
-  const d = cleanPhoneSN(value);
-  if (!d) return "";
-  if (d.length <= 2) return d;
-  if (d.length <= 5) return `${d.slice(0, 2)} ${d.slice(2)}`;
-  if (d.length <= 7) return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5)}`;
-  return `${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7, 9)}`;
-};
-const normalizePhoneSN = (value) => {
-  const d = cleanPhoneSN(value);
-  return d ? `+221 ${formatPhoneSN(d)}` : null;
-};
-const assertPhoneSN = (value, label = "Numéro de téléphone") => {
-  const d = cleanPhoneSN(value);
-  if (!d) return { ok: true, value: null };
-  if (!isPhoneSNValid(d)) {
-    return { ok: false, message: `${label} invalide. Utilisez un numéro sénégalais valide : 77, 76, 75, 78, 70, 71 ou 33 + 7 chiffres.` };
-  }
-  return { ok: true, value: normalizePhoneSN(d) };
-};
-
 function PhoneSNInput({ value, onChange, style, placeholder = "77 123 45 67" }) {
   const digits = cleanPhoneSN(value);
   const hasValue = digits.length > 0;
   const valid = !hasValue || isPhoneSNValid(digits);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${valid ? INK + "22" : CORAL}`, borderRadius: 7, overflow: "hidden", background: "#fff", minWidth: 190 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 190 }}>
+      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${valid ? INK + "22" : CORAL}`, borderRadius: 7, overflow: "hidden", background: "#fff" }}>
         <span style={{ padding: "8px 10px", background: `${TEAL}12`, color: INK, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>🇸🇳 +221</span>
         <input
           type="tel"
+          inputMode="numeric"
           placeholder={placeholder}
           value={formatPhoneSN(digits)}
           maxLength={12}
@@ -390,7 +387,7 @@ function PhoneSNInput({ value, onChange, style, placeholder = "77 123 45 67" }) 
           style={{ ...style, border: "none", minWidth: 135, outline: "none" }}
         />
       </div>
-      {!valid && <span style={{ color: CORAL, fontSize: 11.5, fontWeight: 800 }}>Préfixes autorisés : 77, 76, 75, 78, 70, 71, 33.</span>}
+      {!valid && <span style={{ color: CORAL, fontSize: 11.5, fontWeight: 800 }}>Préfixes autorisés : 70, 71, 75, 76, 77, 78, 33.</span>}
     </div>
   );
 }
@@ -1380,13 +1377,11 @@ export default function App() {
     if (isSuperAdmin && !getEntrepriseSystemeId()) return setMessage("Entreprise système ENT-SUPER introuvable. Exécutez le script SQL V6.9.6.");
 
     e.preventDefault();
-    const telCheck = assertPhoneSN(employeForm.telephone, "Téléphone employé");
-    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!employeForm.nom_complet.trim()) return setMessage("Veuillez renseigner le nom complet.");
     const payload = {
       created_by: profil.id,
       nom_complet: employeForm.nom_complet.trim(),
-      telephone: telCheck.value,
+      telephone: employeForm.telephone ? `+221 ${String(employeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
       email: employeForm.email || null,
       poste: employeForm.poste || null,
       salaire_base: Number(employeForm.salaire_base || 0),
@@ -1510,13 +1505,11 @@ export default function App() {
 
   async function saveProspect(e) {
     e.preventDefault();
-    const telCheck = assertPhoneSN(prospectForm.telephone, "Téléphone prospect");
-    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!prospectForm.nom.trim()) return setMessage("Veuillez renseigner le nom du prospect.");
     const payload = {
       entreprise_id: entreprise.id,
       nom: prospectForm.nom.trim(),
-      telephone: telCheck.value,
+      telephone: prospectForm.telephone ? `+221 ${String(prospectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
       email: prospectForm.email || null,
       source: prospectForm.source || null,
       statut: prospectForm.statut,
@@ -1879,9 +1872,9 @@ export default function App() {
 
   async function savePerson(table, form, setter, empty) {
     if (!entreprise?.id || !form.nom.trim()) return;
-    const tel = assertPhoneSN(form.telephone, "Téléphone");
-    if (!tel.ok) return setMessage(tel.message);
-    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: tel.value, email: form.email || null, adresse: form.adresse || null };
+    const telCheck = assertPhoneSN(form.telephone, "Téléphone");
+    if (!telCheck.ok) return setMessage(telCheck.message);
+    const payload = { entreprise_id: entreprise.id, nom: form.nom.trim(), telephone: telCheck.value, email: form.email || null, adresse: form.adresse || null };
     if (!form.id && table === "clients") payload.code_client = `CLI-${String(Date.now()).slice(-6)}`;
     if (!form.id && table === "fournisseurs") payload.code_fournisseur = `FOU-${String(Date.now()).slice(-6)}`;
     const res = form.id ? await supabase.from(table).update(payload).eq("id", form.id) : await supabase.from(table).insert(payload);
@@ -2416,7 +2409,7 @@ export default function App() {
     e.preventDefault();
     const telCheck = assertPhoneSN(entrepriseForm.telephone, "Téléphone entreprise");
     if (!telCheck.ok) return setMessage(telCheck.message);
-    const payloadEntreprise = { ...entrepriseForm, telephone: assertPhoneSN(entrepriseForm.telephone, "Téléphone entreprise").value };
+    const payloadEntreprise = { ...entrepriseForm, telephone: telCheck.value };
     const { error } = await supabase.from("entreprises").update(payloadEntreprise).eq("id", entreprise.id);
     if (error) showError(error, "Impossible de modifier les paramètres."); else { setMessage("Paramètres enregistrés."); chargerProfilEtEntreprise(); }
   }
@@ -2445,27 +2438,27 @@ export default function App() {
           <title>${safeText(ref)}</title>
           <style>
             * { box-sizing: border-box; }
-            body { font-family: Inter, Arial, sans-serif; margin: 0; background: #eef3f6; color: #152238; }
-            .page { width: 860px; margin: 24px auto; background: white; padding: 0; border-radius: 18px; overflow:hidden; box-shadow:0 24px 70px rgba(21,34,56,.16); }
-            .header { display: flex; justify-content: space-between; gap: 20px; padding: 34px 38px 24px; background:linear-gradient(135deg,#152238 0%,#1E7F6E 72%,#E0913C 100%); color:white; }
+            body { font-family: Arial, sans-serif; margin: 0; background: #f4f4f4; color: #152238; }
+            .page { width: 800px; margin: 24px auto; background: white; padding: 38px; border-radius: 12px; }
+            .header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 4px solid #1E7F6E; padding-bottom: 18px; }
             .brand h1 { margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: .5px; }
-            .brand div { margin-top: 6px; font-size: 13px; color: rgba(255,255,255,.86); line-height: 1.45; }
+            .brand div { margin-top: 6px; font-size: 13px; color: #5b6472; line-height: 1.45; }
             .badge { text-align: right; }
-            .badge h2 { margin: 0; color: #fff; font-size: 30px; letter-spacing:.8px; }
-            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; color:rgba(255,255,255,.9); }
-            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 26px 38px; }
+            .badge h2 { margin: 0; color: #1E7F6E; font-size: 26px; }
+            .badge div { margin-top: 8px; font-size: 14px; font-weight: bold; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
             .box { border: 1px solid #e2e6ea; border-radius: 10px; padding: 14px; min-height: 110px; }
             .box-title { font-size: 12px; text-transform: uppercase; color: #1E7F6E; font-weight: bold; margin-bottom: 10px; letter-spacing: .4px; }
             .line { font-size: 14px; margin: 5px 0; line-height: 1.35; }
-            table { width: calc(100% - 76px); margin: 10px 38px 0; border-collapse: collapse; border-radius:12px; overflow:hidden; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
             th { background: #152238; color: #fff; text-align: left; padding: 12px; font-size: 12px; text-transform: uppercase; }
             td { padding: 13px 12px; border-bottom: 1px solid #e8eaee; font-size: 14px; }
             .right { text-align: right; }
-            .total-box { margin-left: auto; margin-top: 24px; margin-right:38px; width: 380px; background:#f8fafc; border: 2px solid #1E7F6E; border-radius: 14px; padding: 16px 18px; }
+            .total-box { margin-left: auto; margin-top: 22px; width: 360px; border: 2px solid #1E7F6E; border-radius: 10px; padding: 14px 16px; }
             .total-line { display:flex; justify-content:space-between; margin: 8px 0; font-size: 14px; }
             .total-row { display: flex; justify-content: space-between; align-items: center; font-size: 22px; font-weight: bold; color: #1E7F6E; border-top: 1px solid #dce5e2; padding-top: 10px; margin-top: 10px; }
-            .footer { margin-top: 34px; padding: 18px 38px 28px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; background:#f8fafc; }
-            .signature { margin-top: 40px; margin-right:38px; display: flex; justify-content: flex-end; }
+            .footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e2e6ea; text-align: center; color: #5b6472; font-size: 13px; }
+            .signature { margin-top: 36px; display: flex; justify-content: flex-end; }
             .signature div { width: 220px; border-top: 1px solid #152238; padding-top: 8px; text-align: center; font-size: 13px; }
             @media print { body { background: white; } .page { width: auto; margin: 0; border-radius: 0; box-shadow: none; } }
           </style>
@@ -2863,8 +2856,6 @@ const { data: existing } = await supabase
 
   async function creerProfilEnAttente(e) {
     e?.preventDefault?.();
-    const telCheck = assertPhoneSN(newUserForm.telephone, "Téléphone utilisateur");
-    if (!telCheck.ok) return setMessage(telCheck.message);
 
     if (!newUserForm.nom_complet?.trim()) return setMessage("Veuillez renseigner le nom complet.");
     if (!newUserForm.email?.trim()) return setMessage("Veuillez renseigner l'email.");
@@ -2907,7 +2898,7 @@ const { data: existing } = await supabase
 
     const { data: ent, error } = await supabase.from("entreprises").insert({
       nom: superPmeForm.nom.trim(),
-      telephone: telCheck.value,
+      telephone: superPmeForm.telephone ? `+221 ${String(superPmeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
       email: superPmeForm.email || null,
       adresse: superPmeForm.adresse || null,
       ninea: superPmeForm.ninea || null,
@@ -3117,7 +3108,7 @@ const { data: existing } = await supabase
     const { error } = await supabase.from("prospects").insert({
       entreprise_id: entreprise?.id || allEntreprises[0]?.id || null,
       nom: superCrmProspectForm.nom.trim(),
-      telephone: telCheck.value,
+      telephone: superCrmProspectForm.telephone ? `+221 ${String(superCrmProspectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
       email: superCrmProspectForm.email || null,
       source: superCrmProspectForm.source || "Plateforme SaaS",
       statut: superCrmProspectForm.statut,
