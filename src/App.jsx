@@ -1379,10 +1379,12 @@ export default function App() {
 
     e.preventDefault();
     if (!employeForm.nom_complet.trim()) return setMessage("Veuillez renseigner le nom complet.");
+    const telCheck = assertPhoneSN(employeForm.telephone, "Téléphone employé");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     const payload = {
       created_by: profil.id,
       nom_complet: employeForm.nom_complet.trim(),
-      telephone: employeForm.telephone ? `+221 ${String(employeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: employeForm.email || null,
       poste: employeForm.poste || null,
       salaire_base: Number(employeForm.salaire_base || 0),
@@ -1507,10 +1509,12 @@ export default function App() {
   async function saveProspect(e) {
     e.preventDefault();
     if (!prospectForm.nom.trim()) return setMessage("Veuillez renseigner le nom du prospect.");
+    const telCheck = assertPhoneSN(prospectForm.telephone, "Téléphone prospect");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     const payload = {
       entreprise_id: entreprise.id,
       nom: prospectForm.nom.trim(),
-      telephone: prospectForm.telephone ? `+221 ${String(prospectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: prospectForm.email || null,
       source: prospectForm.source || null,
       statut: prospectForm.statut,
@@ -1828,6 +1832,8 @@ export default function App() {
     if (!entreprise?.id && !profil?.entreprise_id) return setMessage("Entreprise introuvable.");
     if (!newUserForm.nom_complet.trim()) return setMessage("Veuillez renseigner le nom complet.");
     if (!newUserForm.email.trim()) return setMessage("Veuillez renseigner l'email.");
+    const telCheck = assertPhoneSN(newUserForm.telephone, "Téléphone utilisateur");
+    if (!telCheck.ok) return setMessage(telCheck.message);
     if (!entreprise?.id) return setMessage("Entreprise introuvable.");
 
     const password = genererMotDePasseTemporaire();
@@ -1836,7 +1842,7 @@ export default function App() {
       body: {
         nom_complet: newUserForm.nom_complet.trim(),
         email: newUserForm.email.trim(),
-        telephone: newUserForm.telephone ? `+221 ${String(newUserForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+        telephone: telCheck.value,
         poste: newUserForm.poste,
         password
       }
@@ -2990,7 +2996,7 @@ const { data: existing } = await supabase
 
     const { data: ent, error } = await supabase.from("entreprises").insert({
       nom: superPmeForm.nom.trim(),
-      telephone: superPmeForm.telephone ? `+221 ${String(superPmeForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: superPmeForm.email || null,
       adresse: superPmeForm.adresse || null,
       ninea: superPmeForm.ninea || null,
@@ -3200,7 +3206,7 @@ const { data: existing } = await supabase
     const { error } = await supabase.from("prospects").insert({
       entreprise_id: entreprise?.id || allEntreprises[0]?.id || null,
       nom: superCrmProspectForm.nom.trim(),
-      telephone: superCrmProspectForm.telephone ? `+221 ${String(superCrmProspectForm.telephone).replace(/^\\+221\\s?/, "")}` : null,
+      telephone: telCheck.value,
       email: superCrmProspectForm.email || null,
       source: superCrmProspectForm.source || "Plateforme SaaS",
       statut: superCrmProspectForm.statut,
@@ -3986,34 +3992,43 @@ function PaginationPro({ page, pages, setPage }) {
 }
 
 function renderVentesTable(ventes, produits, clients, cell, deleteRow, imprimerFacture, facturesOnly = false) {
+  const rows = Array.isArray(ventes) ? ventes : [];
+  const rowsGroupes = rows.every((v) => Array.isArray(v.lignes))
+    ? rows
+    : buildFactureGroups(rows, produits, clients);
+
   return (
-    <Table headers={["Date", "Référence", "Client", "Produits", "Qté totale", "Total", "Mode", "Statut", "Actions"]}>
-      {ventes.map((v) => {
-        const isGroupe = Array.isArray(v.lignes);
+    <Table headers={["Date", "Référence", "Client", "Détail facture", "Nb produits", "Qté totale", "Total facture", "Mode", "Statut", "Actions"]}>
+      {rowsGroupes.map((v) => {
+        const lignes = Array.isArray(v.lignes) ? v.lignes : [];
         const c = v.client || clients.find((x) => x.id === v.client_id);
-        const produitsText = isGroupe
-          ? v.lignes.map((l) => `${l.produit?.nom || "Produit"} x${l.quantite}`).join(" | ")
+        const nbProduits = lignes.length || 1;
+        const produitsText = lignes.length
+          ? lignes.map((l, i) => `${i + 1}. ${l.produit?.nom || produits.find((p) => p.id === l.produit_id)?.nom || "Produit"} x${l.quantite}`).join("  •  ")
           : (produits.find((x) => x.id === v.produit_id)?.nom || "—");
-        const total = isGroupe ? Number(v.total || 0) : Number(v.quantite || 0) * Number(v.prix_unitaire || 0);
-        const qte = isGroupe ? Number(v.quantite || 0) : Number(v.quantite || 0);
+        const total = lignes.length ? Number(v.total || 0) : Number(v.quantite || 0) * Number(v.prix_unitaire || 0);
+        const qte = lignes.length ? Number(v.quantite || 0) : Number(v.quantite || 0);
         const statut = v.statut || "validée";
+        const ids = Array.isArray(v.ids) ? v.ids : [v.id].filter(Boolean);
+
         return (
-          <tr key={v.id} style={{ borderTop: `1px solid ${INK}0D` }}>
+          <tr key={v.id || `${v.reference}-${v.client_id}`} style={{ borderTop: `1px solid ${INK}0D` }}>
             <td style={cell}>{v.date_vente}</td>
-            <td style={cell}>{v.reference || factureReferenceGroupe(v)}</td>
+            <td style={{ ...cell, fontWeight: 900, color: INK }}>{v.reference || factureReferenceGroupe(v)}</td>
             <td style={cell}>{c?.nom || "Client non renseigné"}</td>
-            <td style={cell}>{produitsText}</td>
+            <td style={{ ...cell, maxWidth: 420, lineHeight: 1.55 }}>
+              <div style={{ fontWeight: 900, color: TEAL, marginBottom: 3 }}>Facture regroupée</div>
+              <div>{produitsText}</div>
+            </td>
+            <td style={cell}>{nbProduits}</td>
             <td style={cell}>{qte}</td>
-            <td style={{ ...cell, color: TEAL, fontWeight: 800 }}>{fmt(total)}</td>
+            <td style={{ ...cell, color: TEAL, fontWeight: 900 }}>{fmt(total)}</td>
             <td style={cell}><PaymentBadge mode={v.mode_paiement || "Espèces"} /></td>
             <td style={cell}>{statut}</td>
             <td style={cell}>
               <button onClick={() => imprimerFacture(v)} style={linkBtn(TEAL)}>Imprimer</button>
               {!facturesOnly && (
-                <button onClick={() => {
-                  if (Array.isArray(v.ids)) v.ids.forEach((id) => deleteRow("ventes", id));
-                  else deleteRow("ventes", v.id);
-                }} style={linkBtn(CORAL)}>Supprimer</button>
+                <button onClick={() => ids.forEach((id) => deleteRow("ventes", id))} style={linkBtn(CORAL)}>Supprimer</button>
               )}
             </td>
           </tr>
